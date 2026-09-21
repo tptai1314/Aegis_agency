@@ -26,6 +26,14 @@ judges:
   backbones: [llama-3, qwen2.5, mistral, gpt-4o, claude-3.5]
   model: meta-llama/Llama-3.1-8B-Instruct   # served by vLLM on :8001 (openai_compat/hf path)
   endpoint: http://127.0.0.1:8001/v1
+  # RQ4 - genuinely mixed-backbone committee (optional): override model/endpoint per backbone.
+  # Each backbone must already be served, e.g. one vLLM instance per port:
+  # models:
+  #   llama-3: meta-llama/Llama-3.1-8B-Instruct
+  #   qwen2.5: Qwen/Qwen2.5-7B-Instruct
+  # endpoints:
+  #   llama-3: http://127.0.0.1:8001/v1
+  #   qwen2.5: http://127.0.0.1:8002/v1
   api_key_env: OPENAI_API_KEY
   embedding_model: all-MiniLM-L6-v2        # "" disables embeddings (m = 0, score-only verdicts)
   isolation: true

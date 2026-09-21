@@ -76,11 +76,23 @@ Alternatives:
 
 ### Realistic committee on one GPU
 `configs/ec2_real_evaluation.yaml` serves **one** model (`judges.model`). All `n_judges`
-judges therefore share that backbone — the committee is *homogeneous by default*. The
-`judges.backbones` list records the intended RQ4 diversity but is not yet mapped to per-
-backbone endpoints. For a first paper run (Table 5/6) keep one strong model; revisit RQ4 by
-serving two checkpoints and pointing `judges.model` per run (see
-`audits/implementation_gaps.md`).
+judges therefore share that backbone — the committee is *homogeneous by default*, which is
+fine for a first Table 5/6 run. For a genuinely diverse RQ4 committee, serve one checkpoint
+per port and map them in the config:
+
+```yaml
+judges:
+  models:
+    llama-3: meta-llama/Llama-3.1-8B-Instruct
+    qwen2.5: Qwen/Qwen2.5-7B-Instruct
+  endpoints:
+    llama-3: http://127.0.0.1:8001/v1
+    qwen2.5: http://127.0.0.1:8002/v1
+```
+
+`judges.backbones` lists the intended RQ4 diversity; any backbone not in the maps falls back
+to the shared `model`/`endpoint`. The honest verdict cache is keyed by `(payload_id,
+judge_id, backbone)`, so changing the mapping invalidates only that backbone's cached rows.
 
 ## 4. Configure the run
 
@@ -133,9 +145,16 @@ real_evaluation_significance.csv   # paired-bootstrap vs coordinator baseline
 real_theory_analysis.csv           # r / gamma / mu / rho + Thm 1 check
 real_isolation_epsilon.csv         # Def 1 epsilon (isolation on/off)
 real_ablation.csv                  # Table 6: agg on/off, committee n, isolation, ρ(measured)
+real_cost_summary.csv              # RQ5: per-build calls / tokens / wall time (iso/noiso)
+real_cost_ledger.csv               # RQ5: same cost split per backbone
 real_evaluation_provenance.json    # data_source=real; is_paper_result=False
 real_ablation_provenance.json      # same provenance contract for the ablation runs
 ```
+
+`real_cost_summary.csv` / `real_cost_ledger.csv` reflect **calls actually made during that
+run**: a re-run over a warm `outputs/real_verdict_cache` reports ~0 cost (the whole point of
+the cache). For honest RQ5 cost/latency numbers, measure on a cold cache — clear
+`outputs/real_verdict_cache` (or use a fresh `benchmark` name) for the run you report.
 
 Manual alternative (equivalent):
 

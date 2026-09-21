@@ -12,8 +12,10 @@ import pytest
 from aegis_agency.data.adapters import CsvBenchmarkAdapter, resolve_benchmark_dir
 from aegis_agency.data.real_judges import (
     JudgePromptBuilder,
+    UsageLedger,
     VerdictCache,
     VerdictParseError,
+    build_real_judges,
     parse_verdict_json,
 )
 from aegis_agency.data.schemas import Decision, Payload, Verdict
@@ -286,6 +288,106 @@ class TestRealAblation:
         labels = {r["ablation"] for r in out["rows"]}
         assert "isolation_on" not in labels
         assert "diverse_backbones" in labels
+
+
+class TestRealDiversity:
+    def test_per_backbone_models_and_endpoints(self):
+        judges = build_real_judges(
+            ("qwen2.5", "llama-3"),
+            backend="openai_compat",
+            n_judges=2,
+            model="fallback-model",
+            models={"qwen2.5": "Qwen/Qwen2.5-7B-Instruct"},
+            endpoints={"qwen2.5": "http://127.0.0.1:8002/v1"},
+        )
+        assert judges[0].model == "Qwen/Qwen2.5-7B-Instruct"
+        assert judges[0].endpoint_or_path == "http://127.0.0.1:8002/v1"
+        assert judges[0].backbone == "qwen2.5"
+        # Unlisted backbone falls back to the shared model/endpoint defaults.
+        assert judges[1].model == "fallback-model"
+        assert judges[1].endpoint_or_path == "http://127.0.0.1:8001/v1"
+
+    def test_no_models_map_is_homogeneous_default(self):
+        judges = build_real_judges(
+            ("llama-3",), backend="openai_compat", n_judges=2, model="m", endpoint="http://e:1/v1"
+        )
+        assert all(j.model == "m" for j in judges)
+        assert all(j.endpoint_or_path == "http://e:1/v1" for j in judges)
+
+    def test_provenance_records_models_and_endpoints(self, tmp_path):
+        data_root = tmp_path / "data"
+        TestRealAblation()._make_benchmark(data_root)
+        cfg = RealRunConfig(
+            n_judges=3,
+            rules=("gmed",),
+            attack="collusion",
+            f=1,
+            data_root=str(data_root),
+            benchmark="harmbench",
+            backend="dummy",
+            embedding_model="",
+            cache_dir=str(tmp_path / "cache"),
+            models={"qwen2.5": "Qwen/Qwen2.5-7B-Instruct"},
+            endpoints={"qwen2.5": "http://127.0.0.1:8002/v1"},
+            limit=24,
+        )
+        out = run_real_ablation(cfg, tmp_path / "out")
+        assert out["provenance"]["config"]["models"] == {"qwen2.5": "Qwen/Qwen2.5-7B-Instruct"}
+
+
+class TestRealCost:
+    def test_usage_ledger_aggregation(self):
+        ledger = UsageLedger()
+        ledger.record(
+            backbone="llama-3",
+            judge_id=0,
+            payload_id="p1",
+            elapsed_s=1.0,
+            prompt_tokens=100,
+            completion_tokens=20,
+        )
+        ledger.record(
+            backbone="qwen2.5",
+            judge_id=1,
+            payload_id="p1",
+            elapsed_s=2.0,
+            prompt_tokens=200,
+            completion_tokens=30,
+        )
+        t = ledger.totals()
+        assert t["calls"] == 2 and t["total_tokens"] == 350
+        assert t["tokens_per_call"] == 175.0
+        assert t["elapsed_s"] == 3.0
+        by_backbone = {r["backbone"]: r for r in ledger.per_backbone()}
+        assert by_backbone["llama-3"]["total_tokens"] == 120
+        assert by_backbone["qwen2.5"]["tokens_per_call"] == 230.0
+
+    def test_dummy_run_writes_cost_artefacts(self, tmp_path):
+        data_root = tmp_path / "data"
+        TestRealRunner()._make_benchmark(data_root)
+        cfg = RealRunConfig(
+            n_judges=3,
+            rules=("gmed",),
+            attack="collusion",
+            f=1,
+            data_root=str(data_root),
+            benchmark="harmbench",
+            backend="dummy",
+            embedding_model="",
+            cache_dir=str(tmp_path / "cache"),
+            limit=24,
+        )
+        out = run_real_evaluation(cfg, tmp_path / "out")
+        # summary + per-backbone ledger files exist and are parseable
+        summary_path = tmp_path / "out" / "real_cost_summary.csv"
+        ledger_path = tmp_path / "out" / "real_cost_ledger.csv"
+        assert summary_path.exists() and ledger_path.exists()
+        header = summary_path.read_text(encoding="utf-8").splitlines()[0]
+        assert "total_tokens" in header and "latency_s_per_call" in header
+        assert out["cost_summary"]
+        # dummy emits no recorded calls (dummy judges are not LLM adapters)
+        assert all(r["calls"] == 0 for r in out["cost_summary"])
+        assert out["cost_backbone"] == []
 
 
 class TestTheoryEstimators:

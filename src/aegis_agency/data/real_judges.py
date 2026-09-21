@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import json
 import re
+from math import nan
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Sequence
 
 import numpy as np
@@ -186,6 +188,77 @@ class EmbeddingExtractor:
         return vec
 
 
+class UsageLedger:
+    """Wall-time + token usage per real LLM judge call (RQ5 security-vs-cost frontier).
+
+    A single ledger instance is shared by every member of one committee build. Only real
+    calls are recorded: cache hits never reach ``judge()`` and so cost nothing. Aggregate
+    with :meth:`totals` / :meth:`per_backbone`; a caller writes the CSV rows.
+    """
+
+    def __init__(self) -> None:
+        self._records: list[dict[str, Any]] = []
+
+    def record(
+        self,
+        *,
+        backbone: str,
+        judge_id: int,
+        payload_id: str,
+        elapsed_s: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        self._records.append(
+            {
+                "backbone": backbone,
+                "judge_id": int(judge_id),
+                "payload_id": payload_id,
+                "elapsed_s": float(elapsed_s),
+                "prompt_tokens": max(0, int(prompt_tokens)),
+                "completion_tokens": max(0, int(completion_tokens)),
+            }
+        )
+
+    def totals(self) -> dict[str, float]:
+        n = len(self._records)
+        pt = float(sum(r["prompt_tokens"] for r in self._records))
+        ct = float(sum(r["completion_tokens"] for r in self._records))
+        el = float(sum(r["elapsed_s"] for r in self._records))
+        return {
+            "calls": float(n),
+            "prompt_tokens": pt,
+            "completion_tokens": ct,
+            "total_tokens": pt + ct,
+            "tokens_per_call": (pt + ct) / n if n else nan,
+            "elapsed_s": el,
+        }
+
+    def per_backbone(self) -> list[dict[str, Any]]:
+        grouped: dict[str, list[dict[str, Any]]] = {}
+        for r in self._records:
+            grouped.setdefault(r["backbone"], []).append(r)
+        rows: list[dict[str, Any]] = []
+        for backbone in sorted(grouped):
+            recs = grouped[backbone]
+            n = len(recs)
+            pt = float(sum(r["prompt_tokens"] for r in recs))
+            ct = float(sum(r["completion_tokens"] for r in recs))
+            el = float(sum(r["elapsed_s"] for r in recs))
+            rows.append(
+                {
+                    "backbone": backbone,
+                    "calls": n,
+                    "prompt_tokens": pt,
+                    "completion_tokens": ct,
+                    "total_tokens": pt + ct,
+                    "tokens_per_call": (pt + ct) / n if n else nan,
+                    "elapsed_s": el,
+                }
+            )
+        return rows
+
+
 class VerdictCache:
     """JSONL cache of honest committee verdicts keyed by (payload_id, judge_id, backbone)."""
 
@@ -299,6 +372,7 @@ class OpenAICompatJudge(LLMJudgeAdapter):
     def judge(self, payload: Payload, judge_id: int, rng: np.random.Generator) -> Verdict:
         prompt = self.prompt_builder.build(payload, judge_id)
         client = self._ensure_client()
+        t0 = perf_counter()
         try:
             resp = client.chat.completions.create(
                 model=self.model,
@@ -307,8 +381,17 @@ class OpenAICompatJudge(LLMJudgeAdapter):
                 max_tokens=self.max_tokens,
             )
             text = resp.choices[0].message.content or ""
+            elapsed = perf_counter() - t0
         except Exception as exc:  # pragma: no cover - network path
             raise RuntimeError(f"OpenAI-compatible endpoint call failed: {exc}") from exc
+        usage = getattr(resp, "usage", None)
+        self._record_cost(
+            payload.payload_id,
+            judge_id,
+            elapsed,
+            getattr(usage, "prompt_tokens", 0) or 0,
+            getattr(usage, "completion_tokens", 0) or 0,
+        )
         decision, score, rationale = parse_verdict_json(text, judge_id)
         embedding = self.embedder.embed(rationale)
         return Verdict(decision=decision, score=score, embedding=embedding, judge_id=judge_id)
@@ -361,6 +444,7 @@ class AnthropicJudge(LLMJudgeAdapter):
     def judge(self, payload: Payload, judge_id: int, rng: np.random.Generator) -> Verdict:
         prompt = self.prompt_builder.build(payload, judge_id)
         client = self._ensure_client()
+        t0 = perf_counter()
         try:
             resp = client.messages.create(
                 model=self.model,
@@ -369,8 +453,17 @@ class AnthropicJudge(LLMJudgeAdapter):
                 messages=[{"role": "user", "content": prompt}],
             )
             text = "".join(block.text for block in resp.content if block.type == "text")
+            elapsed = perf_counter() - t0
         except Exception as exc:  # pragma: no cover - network path
             raise RuntimeError(f"Anthropic API call failed: {exc}") from exc
+        usage = getattr(resp, "usage", None)
+        self._record_cost(
+            payload.payload_id,
+            judge_id,
+            elapsed,
+            getattr(usage, "input_tokens", 0) or 0,
+            getattr(usage, "output_tokens", 0) or 0,
+        )
         decision, score, rationale = parse_verdict_json(text, judge_id)
         embedding = self.embedder.embed(rationale)
         return Verdict(decision=decision, score=score, embedding=embedding, judge_id=judge_id)
@@ -419,6 +512,7 @@ class HuggingFaceJudge(LLMJudgeAdapter):
     def judge(self, payload: Payload, judge_id: int, rng: np.random.Generator) -> Verdict:
         prompt = self.prompt_builder.build(payload, judge_id)
         pipe = self._ensure_pipe()
+        t0 = perf_counter()
         try:
             output = pipe(
                 prompt,
@@ -427,8 +521,11 @@ class HuggingFaceJudge(LLMJudgeAdapter):
                 truncation=True,
             )
             generated = str(output[0]["generated_text"])
+            elapsed = perf_counter() - t0
         except Exception as exc:  # pragma: no cover - model path
             raise RuntimeError(f"HuggingFace checkpoint call failed: {exc}") from exc
+        # Local checkpoints report no token usage; record wall time only (0 tokens).
+        self._record_cost(payload.payload_id, judge_id, elapsed, 0, 0)
         # Strip the echoed prompt before parsing the model's continuation.
         text = generated[len(prompt) :].strip()
         decision, score, rationale = parse_verdict_json(text, judge_id)
@@ -445,22 +542,35 @@ def build_real_judges(
     endpoint: str = "",
     embedding_model: str = "",
     isolation: bool = True,
+    models: dict[str, str] | None = None,
+    endpoints: dict[str, str] | None = None,
 ) -> list[LLMJudgeAdapter]:
     """Instantiate a committee of ``n_judges`` real judges from the backbone list.
 
     Backbones are cycled, so a list shorter than ``n_judges`` builds a diverse committee of
-    the available models in round-robin order (RQ4). For the local (HF) backend all judges
-    share ``model``.
+    the available models in round-robin order (RQ4). ``models`` / ``endpoints`` override the
+    (shared) ``model`` / ``endpoint`` per backbone name, so a genuinely mixed-backbone
+    committee can be declared in the config (e.g. each backbone served by its own vLLM port).
+    Unlisted backbones fall back to ``model`` / ``endpoint`` unchanged.
     """
     judges: list[LLMJudgeAdapter] = []
+    default_endpoint = endpoint or "http://127.0.0.1:8001/v1"
     for k in range(n_judges):
         backbone = backbones[k % len(backbones)] if backbones else f"backend-{k}"
+        if models and backbone in models:
+            model_name = models[backbone]
+        else:
+            model_name = model
+        if endpoints and backbone in endpoints:
+            endpoint_url = endpoints[backbone]
+        else:
+            endpoint_url = endpoint
         if backend == "openai_compat":
             judges.append(
                 OpenAICompatJudge(
                     backbone=backbone,
-                    model=model,
-                    endpoint=endpoint or "http://127.0.0.1:8001/v1",
+                    model=model_name,
+                    endpoint=endpoint_url or default_endpoint,
                     embedding_model=embedding_model,
                     isolation=isolation,
                 )
@@ -469,7 +579,7 @@ def build_real_judges(
             judges.append(
                 AnthropicJudge(
                     backbone=backbone,
-                    model=model,
+                    model=model_name,
                     embedding_model=embedding_model,
                     isolation=isolation,
                 )
@@ -478,7 +588,7 @@ def build_real_judges(
             judges.append(
                 HuggingFaceJudge(
                     backbone=backbone,
-                    model_path=model,
+                    model_path=model_name,
                     embedding_model=embedding_model,
                     isolation=isolation,
                 )

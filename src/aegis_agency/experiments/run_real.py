@@ -14,10 +14,12 @@ Outputs
   this is the Table 5/6 format (asr_uc carries the mean for :mod:`plot_results`).
 * ``real_evaluation_significance.csv`` -- paired-bootstrap mean-difference tests of every
   method vs the coordinator baseline (Section 10 reproducibility checklist).
-* ``real_theory_analysis.csv``         -- measured r, gamma, mu, rho, score_rho and whether
+* ``real_theory_analysis.csv``       -- measured r, gamma, mu, rho, score_rho and whether
   Thm 1's condition binds, estimated from the honest committee verdicts.
-* ``real_isolation_epsilon.csv``       -- Def 1 epsilon measured by replaying an injected
+* ``real_isolation_epsilon.csv``     -- Def 1 epsilon measured by replaying an injected
   payload against the same judges under isolation on/off.
+* ``real_cost_summary.csv``          -- per-build LLM calls / tokens / wall time (RQ5).
+* ``real_cost_ledger.csv``           -- the same cost split per backbone (isor/noiso builds).
 
 Key behaviours
 --------------
@@ -46,7 +48,11 @@ import numpy as np
 
 from aegis_agency.attacks import ATTACKS, Attack
 from aegis_agency.data.adapters import CsvBenchmarkAdapter, resolve_benchmark_dir
-from aegis_agency.data.real_judges import VerdictCache, build_real_judges
+from aegis_agency.data.real_judges import (
+    UsageLedger,
+    VerdictCache,
+    build_real_judges,
+)
 from aegis_agency.data.schemas import Decision, Payload, Verdict
 from aegis_agency.experiments.harness import TrialConfig, build_pipelines
 from aegis_agency.judges.base import JudgeModel
@@ -106,6 +112,10 @@ class RealRunConfig:
     isolation: bool = True
     cache_dir: str = "outputs/real_verdict_cache"
     attack_kwargs: dict = field(default_factory=dict)
+    #: Per-backbone override of the shared ``model``/``endpoint`` (RQ4 diversity). Backbones
+    #: not listed fall back to the global values. Empty => previous homogeneous behaviour.
+    models: dict[str, str] | None = None
+    endpoints: dict[str, str] | None = None
     #: Repeat the whole sweep over seeds and report mean +/- std (Table 5/6 discipline).
     n_seeds: int = 3
     #: Measure r / gamma / mu / rho on the honest committee verdicts (Section 8).
@@ -190,8 +200,14 @@ def _build_committee(
     cache_dir: Path,
     isolation: bool,
     cache_name: str | None = None,
+    ledgers: dict[str, UsageLedger] | None = None,
 ) -> list[_CachedJudge]:
-    """Build a cached honest committee for the given isolation setting."""
+    """Build a cached honest committee for the given isolation setting.
+
+    Every real judge in the build shares one :class:`UsageLedger` recording cost/latency per
+    LLM call (RQ5). If ``ledgers`` is given, the ledger is registered under ``"iso"`` /
+    ``"noiso"`` so the runner can write the per-backbone cost CSV.
+    """
     raw: list[Any]
     if cfg.backend == "dummy":
         raw = _dummy_committee(cfg.n_judges)
@@ -204,7 +220,16 @@ def _build_committee(
             endpoint=cfg.endpoint,
             embedding_model=cfg.embedding_model,
             isolation=isolation,
+            models=cfg.models,
+            endpoints=cfg.endpoints,
         )
+    ledger = UsageLedger()
+    for judge in raw:
+        set_ledger = getattr(judge, "set_ledger", None)
+        if set_ledger is not None:
+            set_ledger(ledger)
+    if ledgers is not None:
+        ledgers["iso" if isolation else "noiso"] = ledger
     if cache_name is None:
         tag = "iso" if isolation else "noiso"
         cache_name = f"{cfg.benchmark}_{tag}_honest.jsonl"
@@ -399,6 +424,7 @@ def _epsilon_rows(
     eval_payloads: Sequence[Payload],
     members_deploy: Sequence[_CachedJudge],
     rng: np.random.Generator,
+    ledgers: dict[str, UsageLedger] | None = None,
 ) -> list[dict]:
     """Estimate Def 1 epsilon: judge verdict flip rate under an injected payload.
 
@@ -410,7 +436,7 @@ def _epsilon_rows(
         if iso == cfg.isolation:
             clean_members = list(members_deploy)
         else:
-            clean_members = _build_committee(cfg, cache_dir, iso)
+            clean_members = _build_committee(cfg, cache_dir, iso, ledgers=ledgers)
         tag = "iso" if iso else "noiso"
         inj_cache = VerdictCache(cache_dir / f"{cfg.benchmark}_{tag}_injected.jsonl")
         inj_members = [_CachedJudge(j.judge, inj_cache, j.backbone) for j in clean_members]
@@ -454,6 +480,51 @@ def _flatten(nested: Sequence[Sequence[Verdict]]) -> list[Verdict]:
 
 def _finite(v: float) -> bool:
     return bool(np.isfinite(v))
+
+
+# -------------------------------------------------------------------- cost / latency (RQ5)
+def _cost_summary_rows(
+    cfg: RealRunConfig,
+    ledgers: dict[str, UsageLedger],
+    n_payloads: int,
+) -> list[dict[str, Any]]:
+    """Per-build RQ5 rows: LLM calls, tokens, and wall time measured this run."""
+    rows: list[dict[str, Any]] = []
+    for build in ("iso", "noiso"):
+        ledger = ledgers.get(build)
+        if ledger is None:
+            continue
+        t = ledger.totals()
+        calls = t["calls"]
+        rows.append(
+            {
+                "build": build,
+                "n_judges": int(cfg.n_judges),
+                "n_payloads": n_payloads,
+                "calls": int(calls),
+                "calls_per_payload": calls / n_payloads if n_payloads else nan,
+                "prompt_tokens": t["prompt_tokens"],
+                "completion_tokens": t["completion_tokens"],
+                "total_tokens": t["total_tokens"],
+                "tokens_per_payload": t["total_tokens"] / n_payloads if n_payloads else nan,
+                "tokens_per_call": t["tokens_per_call"],
+                "elapsed_s": t["elapsed_s"],
+                "latency_s_per_call": t["elapsed_s"] / calls if calls else nan,
+            }
+        )
+    return rows
+
+
+def _cost_backbone_rows(ledgers: dict[str, UsageLedger]) -> list[dict[str, Any]]:
+    """Per-build x per-backbone rows (diversity also shows up in the cost split)."""
+    rows: list[dict[str, Any]] = []
+    for build in ("iso", "noiso"):
+        ledger = ledgers.get(build)
+        if ledger is None:
+            continue
+        for backbone_row in ledger.per_backbone():
+            rows.append({"build": build, **backbone_row})
+    return rows
 
 
 # -------------------------------------------------------------------- ablation (Table 6)
@@ -566,7 +637,14 @@ def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
         raise ValueError(f"Benchmark {cfg.benchmark!r} yielded no payloads at {cfg.data_root}.")
     logger.info("Ablation: %d payload(s) from %s (%s).", len(payloads), benchmark_dir, cfg.benchmark)
 
-    members = _build_committee(cfg, cache_dir, cfg.isolation, cache_name=f"{cfg.benchmark}_honest.jsonl")
+    ledgers: dict[str, UsageLedger] = {}
+    members = _build_committee(
+        cfg,
+        cache_dir,
+        cfg.isolation,
+        cache_name=f"{cfg.benchmark}_honest.jsonl",
+        ledgers=ledgers,
+    )
     attack_cls = ATTACKS[cfg.attack]
     attack_kwargs = dict(cfg.attack_kwargs)
     if cfg.attack == "collusion" and "radius" not in attack_kwargs:
@@ -607,7 +685,7 @@ def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
 
     # --- payload isolation on/off -> Def 1 epsilon (replays the injected payload) ---
     if cfg.measure_epsilon and eval_payloads:
-        eps = _epsilon_rows(cfg, eval_payloads, members, rng)
+        eps = _epsilon_rows(cfg, eval_payloads, members, rng, ledgers=ledgers)
         for iso in (True, False):
             row = next(
                 (r for r in eps if r["isolation"] == iso and r["level"] == "overall"), None
@@ -642,7 +720,13 @@ def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
         )
     )
 
+    # --- cost / latency per build (RQ5; cheap because verdicts are cached) ---
+    cost_summary = _cost_summary_rows(cfg, ledgers, len(eval_payloads))
+    cost_backbone = _cost_backbone_rows(ledgers)
+
     write_csv(out_dir / "real_ablation.csv", cells)
+    write_csv(out_dir / "real_cost_summary.csv", cost_summary)
+    write_csv(out_dir / "real_cost_ledger.csv", cost_backbone)
     prov = RunProvenance(
         run_id="real_ablation",
         stage="ablation",
@@ -655,6 +739,8 @@ def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
             "backend": cfg.backend,
             "backbones": list(cfg.backbones),
             "model": cfg.model,
+            "models": cfg.models,
+            "endpoints": cfg.endpoints,
             "embedding_model": cfg.embedding_model,
             "isolation": cfg.isolation,
             "threshold": cfg.threshold,
@@ -668,7 +754,13 @@ def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
     )
     write_json(out_dir / "real_ablation_provenance.json", prov.to_dict())
     logger.info("Wrote %d ablation rows to %s (real verdicts).", len(cells), out_dir / "real_ablation.csv")
-    return {"rows": cells, "provenance": prov.to_dict(), "n_cached": len(members[0].cache) if members else 0}
+    return {
+        "rows": cells,
+        "cost_summary": cost_summary,
+        "cost_backbone": cost_backbone,
+        "provenance": prov.to_dict(),
+        "n_cached": len(members[0].cache) if members else 0,
+    }
 
 
 # --------------------------------------------------------------------------------- runner
@@ -688,7 +780,10 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
         raise ValueError(f"Benchmark {cfg.benchmark!r} yielded no payloads at {cfg.data_root}.")
     logger.info("Loaded %d payload(s) from %s (%s).", len(payloads), benchmark_dir, cfg.benchmark)
 
-    members = _build_committee(cfg, cache_dir, cfg.isolation, cache_name=f"{cfg.benchmark}_honest.jsonl")
+    ledgers: dict[str, UsageLedger] = {}
+    members = _build_committee(
+        cfg, cache_dir, cfg.isolation, cache_name=f"{cfg.benchmark}_honest.jsonl", ledgers=ledgers
+    )
     pipelines = build_pipelines(
         TrialConfig(
             n_judges=cfg.n_judges,
@@ -763,7 +858,11 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
 
     epsilon_rows: list[dict] = []
     if cfg.measure_epsilon and eval_payloads:
-        epsilon_rows = _epsilon_rows(cfg, eval_payloads, members, rng)
+        epsilon_rows = _epsilon_rows(cfg, eval_payloads, members, rng, ledgers=ledgers)
+
+    # ---- cost / latency (RQ5) ----
+    cost_summary = _cost_summary_rows(cfg, ledgers, len(eval_payloads))
+    cost_backbone = _cost_backbone_rows(ledgers)
 
     # ---- write artefacts ----
     write_csv(out_dir / "real_evaluation_sweep.csv", sweep_rows)
@@ -771,6 +870,8 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
     write_csv(out_dir / "real_evaluation_significance.csv", significance_rows)
     write_csv(out_dir / "real_theory_analysis.csv", theory_rows)
     write_csv(out_dir / "real_isolation_epsilon.csv", epsilon_rows)
+    write_csv(out_dir / "real_cost_summary.csv", cost_summary)
+    write_csv(out_dir / "real_cost_ledger.csv", cost_backbone)
 
     prov = RunProvenance(
         run_id="real_evaluation",
@@ -790,6 +891,8 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
             "backend": cfg.backend,
             "backbones": list(cfg.backbones),
             "model": cfg.model,
+            "models": cfg.models,
+            "endpoints": cfg.endpoints,
             "embedding_model": cfg.embedding_model,
             "isolation": cfg.isolation,
             "measure_theory": cfg.measure_theory,
@@ -816,6 +919,8 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
         "significance": significance_rows,
         "theory": theory_rows,
         "epsilon": epsilon_rows,
+        "cost_summary": cost_summary,
+        "cost_backbone": cost_backbone,
         "provenance": prov.to_dict(),
         "n_cached": len(members[0].cache) if members else 0,
     }

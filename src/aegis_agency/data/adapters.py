@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import abc
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 import numpy as np
 
@@ -115,7 +115,30 @@ class LLMJudgeAdapter(abc.ABC):
         self.backbone = backbone
         self.endpoint_or_path = endpoint_or_path
         self.isolation = isolation
+        self._ledger: Any = None
 
     @abc.abstractmethod
     def judge(self, payload: Payload, judge_id: int, rng: np.random.Generator) -> Verdict:
         raise NotImplementedError  # pragma: no cover
+
+    def set_ledger(self, ledger: Any) -> None:
+        """Attach a UsageLedger so ``judge()`` records cost/latency (RQ5). Optional."""
+        self._ledger = ledger
+
+    def _record_cost(
+        self,
+        payload_id: str,
+        judge_id: int,
+        elapsed_s: float,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> None:
+        if self._ledger is not None:
+            self._ledger.record(
+                backbone=self.backbone,
+                judge_id=int(judge_id),
+                payload_id=payload_id,
+                elapsed_s=float(elapsed_s),
+                prompt_tokens=int(prompt_tokens),
+                completion_tokens=int(completion_tokens),
+            )
