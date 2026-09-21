@@ -37,7 +37,6 @@ Key behaviours
 
 from __future__ import annotations
 
-import argparse
 from dataclasses import dataclass, field
 from math import nan
 from pathlib import Path
@@ -613,30 +612,3 @@ def _set_pipeline_threshold(pipe: Any, tau: float) -> None:
         gate.config.threshold = tau
     elif hasattr(pipe, "threshold"):
         pipe.threshold = tau  # type: ignore[attr-defined]
-
-
-def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - thin CLI
-    ap = argparse.ArgumentParser(
-        description="Aegis-Agency real-data evaluation (EC2; adapters never auto-download)."
-    )
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--output", default="outputs/real")
-    ap.add_argument("--backend", default=None, choices=["openai_compat", "anthropic", "hf", "dummy"])
-    ap.add_argument("--limit", type=int, default=0, help="Cap payloads (0 = all).")
-    args = ap.parse_args(argv)
-
-    from aegis_agency.utils.io import load_yaml
-    from aegis_agency.utils.logging import configure_logging
-
-    configure_logging()
-    cfg = parse_real_config(load_yaml(args.config))
-    if args.backend:
-        cfg.backend = args.backend
-    if args.limit:
-        cfg.limit = args.limit
-    run_real_evaluation(cfg, args.output)
-    return 0
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(main())

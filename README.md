@@ -65,8 +65,16 @@ python -m aegis_agency.cli plot --input outputs/eval/evaluation_sweep.csv --outp
 ## Real-data usage (EC2)
 This repo never downloads data. Place benchmarks on disk (see `docs/data_format.md`), wire the
 real LLM-judge and baseline adapters (`docs/baseline_adapters.md`), and follow
-`docs/ec2_experiment_guide.md`. Then run `scripts/run_experiment.py` stages against real
-verdicts.
+`docs/ec2_experiment_guide.md`. Then run the real-data runner:
+
+```bash
+python scripts/run_real_experiment.py evaluate \
+    --config configs/ec2_real_evaluation.yaml --output outputs/real
+```
+
+The synthetic runner (`scripts/run_experiment.py {calibrate|evaluate|ablate|demo}`) exercises
+the same aggregation/attack/metrics code path for mechanism checks; only
+`run_real_experiment.py` produces provenance-marked real results.
 
 ## Folder structure
 ```
@@ -79,12 +87,12 @@ AegisAgency/
     judges/       base.py  synthetic_judges.py  isolation.py
     methods/      aggregators.py  calibration.py  gate.py
     attacks/      compromise.py  collusion.py  injection.py  adaptive.py
-    metrics/      metrics.py  theory.py  confidence_intervals.py  cost.py
+    metrics/      metrics.py  theory.py  confidence_intervals.py  cost.py  estimators.py
     baselines/    no_defense.py  single_model.py  majority_vote.py  autodefense.py  external_wrappers.py
-    experiments/  harness.py  run_calibration.py  run_evaluation.py  run_ablation.py  plot_results.py
+    experiments/  harness.py  run_calibration.py  run_evaluation.py  run_ablation.py  run_real.py  plot_results.py
     utils/        logging.py  seeding.py  io.py  validation.py  provenance.py
-  scripts/        run_synthetic_demo.py  run_experiment.py  make_plots.py
-  tests/          (47 tests)
+  scripts/        run_synthetic_demo.py  run_experiment.py  run_real_experiment.py  make_plots.py
+  tests/          (67 tests)
   examples/       example_config.yaml  synthetic_data/  README.md
   docs/           implementation_notes.md  data_format.md  baseline_adapters.md  reproducibility.md  ec2_experiment_guide.md
   outputs/        (regenerable synthetic artefacts)
@@ -129,9 +137,9 @@ Full lists: `audits/implementation_gaps.md`, `TODO_IMPLEMENTATION.md`.
 
 ## Tests
 ```bash
-pytest -q          # 47 tests, synthetic only, no network
-ruff check .       # lint (passes)
-mypy src           # types (passes)
+python -m pytest -q    # 67 tests, synthetic only, no network
+python -m ruff check src tests
+python -m mypy src tests
 ```
 
 ## License

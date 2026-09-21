@@ -44,6 +44,42 @@ def _load_cfg(path: str | None) -> TrialConfig:
     return _config_from_dict(load_yaml(path))
 
 
+def add_common_run_args(
+    ap: argparse.ArgumentParser,
+    *,
+    output_default: str,
+    config_default: str | None = None,
+) -> None:
+    """Attach the shared --config / --output flags so every run script has one CLI surface."""
+    ap.add_argument(
+        "--config",
+        default=config_default,
+        help="YAML config path (defaults to built-in defaults).",
+    )
+    ap.add_argument("--output", default=output_default, help="Output directory.")
+
+
+def add_real_run_args(ap: argparse.ArgumentParser) -> None:
+    """Attach the flags specific to the real-data runner (adapters; never auto-download)."""
+    ap.add_argument(
+        "--backend",
+        default=None,
+        choices=["openai_compat", "anthropic", "hf", "dummy"],
+        help="Override judge backend; dummy = offline plumbing tests only.",
+    )
+    ap.add_argument("--limit", type=int, default=0, help="Cap payloads (0 = all).")
+
+
+def run_demo(cfg: TrialConfig, out: Path) -> None:
+    """Synthetic smoke-test demo: calibrate + evaluate + plot (synthetic banner)."""
+    run_calibration(cfg, out)
+    run_evaluation(cfg, out)
+    plot_evaluation_sweep(out / "evaluation_sweep.csv", out / "asr_vs_f.png", synthetic=True)
+    logger.info(
+        "Synthetic demo complete. Outputs in %s (synthetic smoke-test, NOT paper results).", out
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aegis_agency", description="Byzantine-robust multi-agent LLM defense pipeline (Aegis-Agency).")
     p.add_argument("--version", action="version", version=f"aegis_agency {__version__}")
@@ -96,10 +132,7 @@ def main(argv: list[str] | None = None) -> int:
     elif args.command == "ablate":
         run_ablation(cfg, out)
     elif args.command == "demo":
-        run_calibration(cfg, out)
-        run_evaluation(cfg, out)
-        plot_evaluation_sweep(out / "evaluation_sweep.csv", out / "asr_vs_f.png", synthetic=True)
-        logger.info("Synthetic demo complete. Outputs in %s (synthetic smoke-test, not paper results).", out)
+        run_demo(cfg, out)
     return 0
 
 

@@ -11,7 +11,7 @@ credentials manually.
 ```bash
 python -m venv .venv && source .venv/bin/activate
 pip install -e ".[dev]"
-pytest -q            # confirm the mechanism works on synthetic data
+python -m pytest -q   # confirm the mechanism works on synthetic data
 ```
 For real LLM judges you will additionally need the backbone runtimes (e.g. `transformers`,
 `vllm`, or API SDKs) and any GPUs those require — these are **not** listed as dependencies
@@ -43,6 +43,11 @@ secrets** — read them from environment variables or a mounted secrets file.
 Replace the synthetic verdict generator with real judge verdicts (via the adapters), then:
 ```bash
 python scripts/run_real_experiment.py evaluate --config configs/ec2_real_evaluation.yaml --output outputs/real
+```
+Smoke-test the plumbing first (dummy judge, capped payloads — **never** report these outputs):
+```bash
+python scripts/run_real_experiment.py evaluate --config configs/ec2_real_evaluation.yaml \
+    --output outputs/real --backend dummy --limit 40
 ```
 This runs the multi-seed f-sweep (mean +/- std over `experiment.n_seeds`), measures the
 theory constants (`measure_theory`) and Def 1 epsilon (`measure_epsilon`). Outputs:

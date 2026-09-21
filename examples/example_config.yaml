@@ -1,6 +1,6 @@
 # Minimal example configuration for a quick synthetic run.
 # Usage:
-#   python scripts/run_experiment.py --config examples/example_config.yaml --stage evaluate --output outputs/example
+#   python scripts/run_experiment.py evaluate --config examples/example_config.yaml --output outputs/example
 experiment:
   n_judges: 5
   rules: [cmed, gmed, krum]

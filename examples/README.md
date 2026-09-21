@@ -21,7 +21,7 @@ point `data.root` at a directory containing a real `test.csv` in this format (se
 A minimal experiment config. Run:
 
 ```bash
-python scripts/run_experiment.py --config examples/example_config.yaml --stage evaluate --output outputs/example
+python scripts/run_experiment.py evaluate --config examples/example_config.yaml --output outputs/example
 python scripts/make_plots.py --input outputs/example/evaluation_sweep.csv --output outputs/example/asr_vs_f.png
 ```
 
