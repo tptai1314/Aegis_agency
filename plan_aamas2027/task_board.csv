@@ -1,6 +1,6 @@
 id,phase,task,owner,start,due,effort_h,depends_on,blocking,muc_do,status
-T0.8,P0,"XIN AWS GPU QUOTA >=256 vCPU bucket G/VT us-east-1 (mac dinh = 0)",,2026-09-21,2026-09-21,1,,yes,"Ho so da gui; xac nhan quota duoc tang (co the mat toi 72h)",todo
-T0.9,P0,"XIN HF ACCESS 5 repo gated: Llama-3.1-8B / Llama-3.3-70B / Meta-Llama-3.1-8B / Gemma-2-9B / Meta-SecAlign-8B",,2026-09-21,2026-09-21,1,,yes,"Ca 5 repo truy cap duoc bang HF_TOKEN tren dung tai khoan",todo
+T0.8,P0,"XIN AWS GPU QUOTA >=96 vCPU bucket G/VT us-east-1 (g6e.12xlarge can 48; mac dinh = 0)",,2026-09-21,2026-09-21,1,,yes,"Ho so da gui; xac nhan quota duoc tang (co the mat toi 72h)",todo
+T0.9,P0,"XIN HF ACCESS 4 repo gated: Llama-3.1-8B / Meta-Llama-3.1-8B / Gemma-2-9B / Meta-SecAlign-8B",,2026-09-21,2026-09-21,1,,yes,"Ca 4 repo truy cap duoc bang HF_TOKEN tren dung tai khoan; Qwen + Mistral khong can xin",todo
 T0.1,P0,Lien he ban PC AAMAS ve han dang ky OpenReview da qua (17/09),,2026-09-21,2026-09-21,0.5,,yes,"Email da gui + tra loi duoc ghi vao decision_log.md",todo
 T0.2,P0,Tao tai khoan OpenReview cho toan bo tac gia,,2026-09-21,2026-09-22,1,T0.1,no,Tat ca tac gia co profile OpenReview hop le,todo
 T0.3,P0,Chot danh sach tac gia that + thu tu + affiliation + email + ORCID,,2026-09-21,2026-09-22,1,,yes,Thay het Author One/Two/Three va chu Placeholder trong main.tex,todo
@@ -82,4 +82,4 @@ C-11,CODE,Script check_numbers.py: moi o so trong .tex phai khop CSV,,2026-10-03
 C-14,CODE,Script sinh supplementary zip <=25MB + tu kiem tra an danh,,2026-10-04,2026-10-05,2,T4.1,T5.4,Script tao zip va kiem tra khong lo danh tinh,todo
 C-15,CODE,"Doi khoa cache sang (payload_id,backbone) + che do chay model-major (uy ban da dang tren 1 GPU)",,2026-09-25,2026-09-26,5,T2.1,T3.6,"Chay duoc uy ban 5 backbone tren 1 GPU; cache ghep dung thanh uy ban",todo
 T0.11,P0,Sua docs/ec2_experiment_guide.md: tach ro muc pilot (1 GPU) va muc paper-level (4-8 GPU),,2026-09-22,2026-09-22,1,,no,Tai lieu khong con gay hieu nham ve cau hinh,todo
-T0.12,P0,Gui lai yeu cau cau hinh cho giang vien theo 2 tang (g5.12xlarge / g6e.48xlarge),,2026-09-21,2026-09-22,1,,yes,Da gui email; co xac nhan ve dia >=250GB va so GPU,todo
+T0.12,P0,"Gui yeu cau cau hinh CHOT cho giang vien: g6e.12xlarge + dia 250GB (kem phuong an thay the)",,2026-09-21,2026-09-22,1,,yes,"Da gui email theo ec2_spec_comparison.md §6; xac nhan dia >=250GB va GPU >=4",todo

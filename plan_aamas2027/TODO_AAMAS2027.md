@@ -17,7 +17,7 @@
 | Việc lớn nhất phải làm? | (1) Sinh **số liệu thực** từ LLM judge thật; (2) **cắt từ 47 trang xuống 8 trang** theo template AAMAS; (3) **định vị lại vì đã bị scoop một phần** (xem dưới); (4) **xin AWS quota + HF access — làm hôm nay**. |
 | Rủi ro lớn nhất? | Ba việc hành chính **mặc định là "0/không có"** và đều có thể mất nhiều ngày: **đăng ký OpenReview (hạn 17/09 ĐÃ QUA)**, **AWS GPU quota (mặc định 0 vCPU)**, **HuggingFace gating (duyệt thủ công)**. |
 | ⚠️ Tin xấu mới | **Bài đã bị scoop một phần.** RoPoLL (arXiv 2606.30931, ICML 2026) đã làm **tổng hợp geometric-median trên panel LLM judge** — tức là chính aggregator `gmed` của bạn. "Many Minds, One Verdict" (07/2026) đã đo **panel đồng thuận bị chặn bởi tương quan lỗi** — tức là Mệnh đề 3. **Không được nộp với cách định vị hiện tại.** → **`positioning_and_related_work.md`** |
-| ✅ Tin tốt mới | **Compute không phải nút thắt.** EC2 `g6e.48xlarge` chạy hết một sweep trong **10–35 phút**. Và **dữ liệu đã xong**: 3.054 payload thật đã build và kiểm tra. |
+| ✅ Tin tốt mới | **Compute không phải nút thắt.** EC2 `g6e.12xlarge` (4× L40S, ~$10,49/giờ) chạy hết một sweep trong **~20 phút**. Và **dữ liệu đã xong**: 3.054 payload thật đã build và kiểm tra. |
 | Có khả thi không? | **Có** — nếu bắt đầu 3 việc hành chính hôm nay và chạy song song dữ liệu – thực nghiệm – viết lại. Xem §8 (rủi ro & dự phòng). |
 
 ### 📁 Tài liệu kèm theo (đọc cùng file này)
@@ -200,10 +200,10 @@ Phương án dự phòng: **EMAS** ("Engineering MAS with LLM methods", "Scalabi
   *Lưu ý: sau khi accepted **không được** đổi danh sách/thứ tự tác giả.*
 - [ ] **T0.4 — Chốt phạm vi bản 8 trang** theo §3.2, và chốt **câu chuyện 3 đóng góp** (§3.3). Ghi vào `plan_aamas2027/scope_locked.md`.
 - [ ] **T0.5 — Chốt area of interest: `GAAI`** (dự phòng EMAS/GTEP) — dùng khi nộp abstract 01/10.
-- [x] **T0.6 — Quyết định nguồn lực — ✅ ĐÃ CHỐT:** self-host trên **EC2 `g6e.48xlarge` on-demand** (8× L40S, 357 GiB VRAM, ~$30,13/giờ), một vLLM server mỗi GPU, **LiteLLM** làm endpoint duy nhất, + API (GPT/Claude) cho các slot proprietary. Chi tiết đầy đủ: **`ec2_runbook.md`**. Không giới hạn chi phí.
-- [ ] **T0.8 — 🔴 XIN AWS GPU QUOTA — LÀM NGAY HÔM NAY.** Quota "Running On-Demand **G and VT** instances" **mặc định = 0 vCPU**; `g6e.48xlarge` cần **192 vCPU** trong bucket G/VT. **Xin ≥ 256** để có dự phòng. Hồ sơ có thể mất **vài giờ đến 72 giờ** và thường bị hỏi mô tả mục đích sử dụng. Xin luôn quota **G/VT Spot** (cũng mặc định 0). *Đây là rủi ro lịch lớn nhất của toàn dự án.*
-- [ ] **T0.9 — 🔴 XIN QUYỀN TRUY CẬP HuggingFace — LÀM NGAY HÔM NAY.** Cả 5 repo đều `gated: "manual"`: `meta-llama/Llama-3.1-8B-Instruct`, `meta-llama/Llama-3.3-70B-Instruct`, **`meta-llama/Meta-Llama-3.1-8B-Instruct`** (base của SecAlign LoRA — repo **khác** với repo trên), `google/gemma-2-9b-it`, `facebook/Meta-SecAlign-8B` (form có ngày sinh/affiliation/geo-IP). Duyệt của Meta là chậm nhất. Tạo HF token trên **đúng tài khoản** đã được duyệt.
-- [ ] **T0.10 — Tải trọng số trên instance CPU rẻ TRONG LÚC CHỜ QUOTA.** Tải không cần GPU. Dùng `HF_HUB_ENABLE_HF_TRANSFER=1` và **`--exclude "original/*"`** (mỗi repo Meta chứa bản trùng `original/*.pth` làm tăng gấp đôi dung lượng: 206 GB thật → 377 GB nếu không loại trừ). Tạo trước **1 TB gp3 @1000 MiB/s, 16.000 IOPS**.
+- [x] **T0.6 — Quyết định nguồn lực — ✅ ĐÃ CHỐT (sau khi kiểm tra lại):** self-host trên **EC2 `g6e.12xlarge` on-demand** — **4× L40S, 179 GB VRAM, 48 vCPU, 384 GiB RAM, ~$10,49/giờ**. Một vLLM server mỗi GPU, **LiteLLM** làm endpoint duy nhất. Uỷ ban 4 backbone (Llama-3.1-8B + SecAlign LoRA, Qwen2.5-7B, Mistral-7B, Gemma-2-9B); `n = 1..7` chạy được nhờ lặp backbone. **Tôi đã hạ từ 8 GPU xuống 4 GPU** vì 4 GPU đã đủ cho cả 4 đóng góp mà rẻ hơn 3 lần và dễ được duyệt hơn (48 vCPU thay vì 192). Lý do đầy đủ: **`ec2_spec_comparison.md` §5**. Runbook: **`ec2_runbook.md`**.
+- [ ] **T0.8 — 🔴 XIN AWS GPU QUOTA — LÀM NGAY HÔM NAY.** Quota "Running On-Demand **G and VT** instances" **mặc định = 0 vCPU**; `g6e.12xlarge` cần **48 vCPU** trong bucket G/VT (xin **≥ 96** để có dự phòng). Hồ sơ có thể mất **vài giờ đến 72 giờ** và thường bị hỏi mô tả mục đích sử dụng. Xin luôn quota **G/VT Spot**. *Đây là rủi ro lịch lớn nhất của toàn dự án.*
+- [ ] **T0.9 — 🔴 XIN QUYỀN TRUY CẬP HuggingFace — LÀM NGAY HÔM NAY.** 4 repo gated cho cấu hình 4-GPU: `meta-llama/Llama-3.1-8B-Instruct`, **`meta-llama/Meta-Llama-3.1-8B-Instruct`** (base của SecAlign LoRA — repo **khác** với repo trên), `google/gemma-2-9b-it`, `facebook/Meta-SecAlign-8B` (form có ngày sinh/affiliation/geo-IP). Còn `Qwen/Qwen2.5-7B-Instruct` và `mistralai/Mistral-7B-Instruct-v0.3` **không cần xin**. *(Tuỳ chọn thêm `meta-llama/Llama-3.3-70B-Instruct` nếu sau này có 8 GPU.)* Duyệt của Meta là chậm nhất. Tạo HF token trên **đúng tài khoản** đã được duyệt.
+- [ ] **T0.10 — Tải trọng số trên instance CPU rẻ TRONG LÚC CHỜ QUOTA.** Tải không cần GPU. Dùng `HF_HUB_ENABLE_HF_TRANSFER=1` và **`--exclude "original/*"`** (mỗi repo Meta chứa bản trùng `original/*.pth` làm tăng gấp đôi dung lượng). Cấu hình 4-GPU cần **~65 GB** trọng số (không có 70B). Tạo trước **250 GB gp3 @1000 MiB/s, 16.000 IOPS**.
 - [ ] **T0.7 — Điền `audits/preregistration_protocol.md` TRƯỚC khi chạy số thật** (đóng băng config, sanity checks, lệnh chạy). Sau khi thấy số, file này bị đóng băng; mọi thay đổi phải ghi vào mục "Protocol amendments".
 
 ### GIAI ĐOẠN P1 — Chuẩn bị dữ liệu (21–25/09) ⛔ chặn P2
@@ -420,7 +420,7 @@ python scripts/make_plots.py --input outputs/real/real_evaluation_summary.csv \
 
 ### 6.5 Ước lượng thời gian & chi phí trên EC2 (đã cập nhật)
 
-Instance: **`g6e.48xlarge`** on-demand — 8× L40S (357 GiB VRAM, 192 vCPU, 1536 GiB RAM), **~$30,13/giờ**. 6 judge song song, `--max-num-seqs 16`, `--max-model-len 2048`.
+Instance: **`g6e.12xlarge`** on-demand — 4× L40S (179 GB VRAM, 48 vCPU, 384 GiB RAM), **~$10,49/giờ**. 4 backbone / 5 slot song song, `--max-num-seqs 16`, `--max-model-len 2048`.
 
 | Pha | Số call mới | Thời gian (6 judge song song) | Chi phí |
 |---|---|---|---|
