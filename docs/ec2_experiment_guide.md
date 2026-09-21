@@ -1,81 +1,159 @@
-# EC2 Experiment Guide
+# EC2 Experiment Guide — real-data runbook
 
-This repository is **EC2-ready** but does not download data or run paper-level experiments
-during generation. Real experiments are run here, after you provision data, models, and
-credentials manually.
+This repository is **EC2-ready**: it never downloads datasets, weights, or credentials. The
+real LLM-judge adapters are implemented (`data/real_judges.py`: OpenAI-compatible / Anthropic
+/ local `transformers` judges, isolation prompt, verdict cache, embeddings); only the
+**external baselines** (`baselines.external_wrappers.*`) remain stubs. This page is the
+concrete runbook to produce the Table 5/6 numbers.
 
-> **Nothing in this repo auto-downloads datasets, weights, or benchmarks.** All of that is a
-> manual, deliberate step you perform on the server.
+Prerequisites you must provide yourself: an EC2 GPU instance, SSH access, the benchmark CSVs
+(prepared locally under `D:\Data\benchmarks`), and the judge backbone (self-hosted vLLM, or
+API keys).
 
-## 1. Provision the environment
+---
+
+## 1. Provision the server (once)
+
+Recommended: a GPU instance (e.g. `g5.xlarge` / `g4dn.2xlarge`+, NVIDIA driver preinstalled,
+CUDA 12.x, ≥ 16 GB VRAM, ≥ 50 GB disk), Ubuntu 22.04/24.04, SSH key inbound.
+
+Clone the repo on the server and run:
+
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
-python -m pytest -q   # confirm the mechanism works on synthetic data
+bash scripts/ec2/setup.sh
 ```
-For real LLM judges you will additionally need the backbone runtimes (e.g. `transformers`,
-`vllm`, or API SDKs) and any GPUs those require — these are **not** listed as dependencies
-because the synthetic mechanism does not need them.
 
-## 2. Place datasets (manual)
-Prepare each benchmark as a CSV in the format of `docs/data_format.md`:
+This installs the system Python, creates `.venv`, installs the package with `.[ec2]` (openai,
+anthropic, transformers, sentence-transformers, vLLM), creates `/data/benchmarks`, and runs
+the synthetic test suite as a sanity check.
+
+> Gated repos (Llama-3): export `HF_TOKEN=...` (Hugging Face read token) before any step that
+> downloads weights. Setup itself needs no token.
+
+## 2. Upload the benchmarks (once)
+
+From your **Windows dev machine** (where the CSVs already live at `D:\Data\benchmarks`):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/ec2/upload_data.ps1 `
+    -HostTarget ubuntu@<ec2-host> -Key "$env:USERPROFILE\.ssh\aegis.pem"
 ```
-/data/harmbench/test.csv
-/data/injecagent/test.csv
-/data/benign/test.csv
+
+This packs `D:\Data\benchmarks` into one tar, `scp`s it, and extracts to `/data/benchmarks`
+on the server. Expected tree (matches `data.root` + `resolve_benchmark_dir`):
+
 ```
-Sources requiring manual download / license / registration (see `audits/implementation_gaps.md`):
-- jailbreak: AdvBench/GCG, PAIR, TAP, GPTFuzzer, in-the-wild DAN, HarmBench.
-- injection: formal injection benchmark, InjecAgent, universal injection.
-- second-order: JudgeDeceiver optimiser (external repo) to generate injected payloads.
+/data/benchmarks/harmbench/test.csv      advbench/  dan/  formal/  injecagent/
+/data/benchmarks/benign/test.csv         second_order/
+```
 
-## 3. Wire real judges and baselines
-Implement the adapter `predict()` / `judge()` methods:
-- `data.adapters.LLMJudgeAdapter` — real hardened judge (backbone + SecAlign/StruQ + isolation).
-- `baselines.external_wrappers.{AutoDefenseAdapter, SecAlignAdapter, StruQAdapter}` — real baselines.
-- `baselines.external_wrappers.JudgeDeceiverAdapter` — real second-order injection.
+Verify the adapter can read them (on the server, repo root, `.venv` active):
 
-Each returns/consumes the schema documented in `docs/baseline_adapters.md`. Provide checkpoint
-paths / API endpoints via `ExternalBaselineConfig.model_path_or_endpoint`; **never commit
-secrets** — read them from environment variables or a mounted secrets file.
-
-## 4. Run the protocol (RQ1-RQ6)
-Replace the synthetic verdict generator with real judge verdicts (via the adapters), then:
 ```bash
-python scripts/run_real_experiment.py evaluate --config configs/ec2_real_evaluation.yaml --output outputs/real
+python - <<'PY'
+from pathlib import Path
+from aegis_agency.data.adapters import CsvBenchmarkAdapter, resolve_benchmark_dir
+for name in ("harmbench", "benign", "injecagent", "dan", "formal", "advbench", "second_order"):
+    ps = list(CsvBenchmarkAdapter(root=Path("/data/benchmarks") / resolve_benchmark_dir(name)).iter_payloads())
+    print(f"{name:14s} n={len(ps):6d} pos={sum(1 for p in ps if p.true_label==1):6d}")
+PY
 ```
-Smoke-test the plumbing first (dummy judge, capped payloads — **never** report these outputs):
-```bash
-python scripts/run_real_experiment.py evaluate --config configs/ec2_real_evaluation.yaml \
-    --output outputs/real --backend dummy --limit 40
-```
-This runs the multi-seed f-sweep (mean +/- std over `experiment.n_seeds`), measures the
-theory constants (`measure_theory`) and Def 1 epsilon (`measure_epsilon`). Outputs:
-```
-outputs/real/real_evaluation_sweep.csv          # first-seed per-(f, method) metrics
-outputs/real/real_evaluation_summary.csv        # mean +/- std over seeds (Table 5/6 format)
-outputs/real/real_evaluation_significance.csv   # paired-bootstrap vs coordinator baseline
-outputs/real/real_theory_analysis.csv           # measured r / gamma / mu / rho, Thm 1 check
-outputs/real/real_isolation_epsilon.csv         # Def 1 epsilon (isolation on/off)
-```
-Plot the summary (mean ASR line):
-```bash
-python scripts/make_plots.py --input outputs/real/real_evaluation_summary.csv --output outputs/real/asr_vs_f.png --real
-```
-Only pass `--real` to plots when the inputs are genuinely real, verified results; set
-`is_paper_result` in provenance only with documented provenance.
 
-> Cost note: `measure_epsilon` replays an injected payload against every judge under both
-> isolation settings (~2 extra judge calls per payload per judge). Set it `false` for a
-> first cheap smoke pass on EC2.
+## 3. Serve the judge backbone (once per boot)
 
-## 5. Record provenance
-Keep the `*provenance.json` files with every result, and update
-`audits/result_integrity_audit.md` to state exactly which outputs are real, where the data
-came from, and which numbers (if any) enter the paper.
+```bash
+HF_TOKEN=<read-token> bash scripts/ec2/serve_vllm.sh      # if using gated Llama-3
+```
+
+Starts an OpenAI-compatible vLLM server on `127.0.0.1:8001`, waits for `/health`, logs to
+`outputs/vllm.log` (pid in `outputs/vllm.pid`). It is idempotent (skips if already running).
+Alternatives:
+
+- **API judges** instead of vLLM: set `judges.backend: openai`-style config accordingly, or
+  `anthropic`, and export the API key that `judges.api_key_env` names.
+- **HuggingFaceJudge** (no server): set `judges.backend: hf` and
+  `judges.model` to a local checkpoint directory. Homogeneous committee of one model.
+
+### Realistic committee on one GPU
+`configs/ec2_real_evaluation.yaml` serves **one** model (`judges.model`). All `n_judges`
+judges therefore share that backbone — the committee is *homogeneous by default*. The
+`judges.backbones` list records the intended RQ4 diversity but is not yet mapped to per-
+backbone endpoints. For a first paper run (Table 5/6) keep one strong model; revisit RQ4 by
+serving two checkpoints and pointing `judges.model` per run (see
+`audits/implementation_gaps.md`).
+
+## 4. Configure the run
+
+`configs/ec2_real_evaluation.yaml` — the knobs that matter:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `experiment.n_seeds` | 3 | sweep repeats; summary reports mean ± std |
+| `experiment.measure_theory` | true | estimate r / γ / μ / ρ on honest verdicts |
+| `experiment.measure_epsilon` | true | Def 1 ε by replaying an injected payload — costly |
+| `data.limit` | 0 | cap payloads (0 = all). Start small |
+| `judges.embedding_model` | `all-MiniLM-L6-v2` | `""` disables embeddings (m = 0) |
+| `judges.isolation` | true | operator delimiters in the judge prompt (Def 1) |
+
+First run downloads the embedding model (~90 MB) — internet or a pre-warmed
+`~/.cache/huggingface` is required.
+
+### Cost of a full harmbench run (400 payloads)
+Judge calls are **serial** (one stream); ~2 s per call on an 8B model on a mid GPU:
+
+| Phase | New judge calls | Notes |
+|---|---|---|
+| honest committee (incl. calibration) | 400 × 7 ≈ 2800 | cached in `outputs/real_verdict_cache` |
+| `measure_epsilon` (isolation on/off) | ≈ 2 × 400 × 7 ≈ 5600 | injected verdicts, cached separately |
+| total | ≈ 8400 | ≈ 4–5 h serial; re-runs reuse caches |
+
+For the first pass on EC2 set `measure_epsilon: false` (or `--limit 200`) to validate end-to-
+end cheaply, then enable it for the final run.
+
+## 5. Run the protocol (RQ1–RQ6)
+
+```bash
+bash scripts/ec2/run_real.sh smoke     # dummy judge, 40 payloads — plumbing only
+bash scripts/ec2/run_real.sh full      # the real run + asr_vs_f.png
+```
+
+`smoke` uses the ground-truth `dummy` judge — **never report those outputs**. `full` runs the
+multi-seed f-sweep (mean ± std), theory measurement, and ε, then plots `asr_vs_f.png`.
+
+Outputs in `outputs/real/`:
+
+```
+real_evaluation_sweep.csv          # first-seed per-(f, method) metrics
+real_evaluation_summary.csv        # mean ± std over seeds (Table 5/6 format)
+real_evaluation_significance.csv   # paired-bootstrap vs coordinator baseline
+real_theory_analysis.csv           # r / gamma / mu / rho + Thm 1 check
+real_isolation_epsilon.csv         # Def 1 epsilon (isolation on/off)
+real_evaluation_provenance.json    # data_source=real; is_paper_result=False
+```
+
+Manual alternative (equivalent):
+
+```bash
+python scripts/run_real_experiment.py evaluate \
+    --config configs/ec2_real_evaluation.yaml --output outputs/real
+python scripts/make_plots.py \
+    --input outputs/real/real_evaluation_summary.csv \
+    --output outputs/real/asr_vs_f.png --real
+```
+
+## 6. Records (paper honesty)
+
+1. Keep every `*provenance.json` with its CSVs.
+2. Edit `audits/result_integrity_audit.md` with: which runs are real, data provenance, exact
+   commands + hashes, and which numbers enter the paper.
+3. Set `is_paper_result: true` in provenance **only** after the verification checklist is
+   applied and the run is reproduced — see `docs/reproducibility.md`.
+4. Fill the `--` cells of Table 5/6 and replace the conceptual curves in Figure 6
+   (`pgfplots_placeholder_results.tex`), then remove the "Placeholder" wording.
 
 ## What EC2 does not change
 - The mechanism, math, and metrics are identical to the synthetic runs; only the *source of
   verdicts* changes (synthetic generator → real LLM judges).
-- The paper's tables/plots remain placeholders until these real runs are executed and their
-  provenance recorded.
+- External baselines for a faithful head-to-head (real AutoDefense, SecAlign, StruQ,
+  JudgeDeceiver) remain adapter stubs; the structural AutoDefense coordinator is already in
+  the comparison set.

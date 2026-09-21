@@ -63,18 +63,20 @@ python -m aegis_agency.cli plot --input outputs/eval/evaluation_sweep.csv --outp
 ```
 
 ## Real-data usage (EC2)
-This repo never downloads data. Place benchmarks on disk (see `docs/data_format.md`), wire the
-real LLM-judge and baseline adapters (`docs/baseline_adapters.md`), and follow
-`docs/ec2_experiment_guide.md`. Then run the real-data runner:
+This repo never downloads data. Prepare benchmarks as CSVs (see `docs/data_format.md`), wire
+the real LLM-judge adapters (already implemented in `src/aegis_agency/data/real_judges.py`),
+and follow the runbook in `docs/ec2_experiment_guide.md`. Orchestration scripts:
 
 ```bash
-python scripts/run_real_experiment.py evaluate \
-    --config configs/ec2_real_evaluation.yaml --output outputs/real
-```
+# dev machine (Windows): upload D:\Data\benchmarks -> EC2
+powershell -ExecutionPolicy Bypass -File scripts/ec2/upload_data.ps1 -HostTarget ubuntu@<host> -Key "$env:USERPROFILE\.ssh\aegis.pem"
 
-The synthetic runner (`scripts/run_experiment.py {calibrate|evaluate|ablate|demo}`) exercises
-the same aggregation/attack/metrics code path for mechanism checks; only
-`run_real_experiment.py` produces provenance-marked real results.
+# on EC2 (one-time): provision + serve backbone + run
+bash scripts/ec2/setup.sh
+bash scripts/ec2/serve_vllm.sh
+bash scripts/ec2/run_real.sh smoke    # plumbing check (dummy judge)
+bash scripts/ec2/run_real.sh full     # the real run (Tables 5/6)
+```
 
 ## Folder structure
 ```
@@ -92,6 +94,7 @@ AegisAgency/
     experiments/  harness.py  run_calibration.py  run_evaluation.py  run_ablation.py  run_real.py  plot_results.py
     utils/        logging.py  seeding.py  io.py  validation.py  provenance.py
   scripts/        run_synthetic_demo.py  run_experiment.py  run_real_experiment.py  make_plots.py
+                  ec2/  setup.sh  serve_vllm.sh  run_real.sh  upload_data.ps1
   tests/          (67 tests)
   examples/       example_config.yaml  synthetic_data/  README.md
   docs/           implementation_notes.md  data_format.md  baseline_adapters.md  reproducibility.md  ec2_experiment_guide.md
