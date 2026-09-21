@@ -21,6 +21,10 @@ Outputs
 * ``real_cost_summary.csv``          -- per-build LLM calls / tokens / wall time (RQ5).
 * ``real_cost_ledger.csv``           -- the same cost split per backbone (isor/noiso builds).
 
+``run_real_ablation`` reuses the same cache (no new LLM calls) and reports its own cost as
+``real_ablation_cost_summary.csv`` / ``real_ablation_cost_ledger.csv`` so a cached ablation
+run never clobbers the evaluate-stage RQ5 numbers.
+
 Key behaviours
 --------------
 * Honest verdicts are cached per ``(payload_id, judge_id, backbone)`` in a JSONL
@@ -175,16 +179,17 @@ def _dummy_committee(n_judges: int) -> list[JudgeModel]:
 class _CachedJudge:
     """Adapter wrapper adding the verdict cache to any committee member."""
 
-    def __init__(self, judge: Any, cache: VerdictCache, backbone: str):
+    def __init__(self, judge: Any, cache: VerdictCache, backbone: str, judge_id: int):
         self.judge = judge
         self.cache = cache
         self.backbone = backbone
+        self.judge_id = judge_id
 
     def verdict(self, payload: Payload, rng: np.random.Generator) -> Verdict:
-        cached = self.cache.lookup(payload.payload_id, self.judge.judge_id, self.backbone)
+        cached = self.cache.lookup(payload.payload_id, self.judge_id, self.backbone)
         if cached is not None:
             return cached
-        verdict = self.judge.judge(payload, self.judge.judge_id, rng)
+        verdict = self.judge.judge(payload, self.judge_id, rng)
         self.cache.store(verdict, payload.payload_id, self.backbone)
         return verdict
 
@@ -234,7 +239,8 @@ def _build_committee(
         tag = "iso" if isolation else "noiso"
         cache_name = f"{cfg.benchmark}_{tag}_honest.jsonl"
     cache = VerdictCache(cache_dir / cache_name)
-    return [_CachedJudge(j, cache, j.backbone) for j in raw]
+    raw_seq: Sequence[Any] = raw
+    return [_CachedJudge(j, cache, j.backbone, k) for k, j in enumerate(raw_seq)]
 
 
 # ---------------------------------------------------------------------------- one seed pass
@@ -439,7 +445,9 @@ def _epsilon_rows(
             clean_members = _build_committee(cfg, cache_dir, iso, ledgers=ledgers)
         tag = "iso" if iso else "noiso"
         inj_cache = VerdictCache(cache_dir / f"{cfg.benchmark}_{tag}_injected.jsonl")
-        inj_members = [_CachedJudge(j.judge, inj_cache, j.backbone) for j in clean_members]
+        inj_members = [
+            _CachedJudge(j.judge, inj_cache, j.backbone, j.judge_id) for j in clean_members
+        ]
 
         clean_committees: list[list[Verdict]] = []
         inj_committees: list[list[Verdict]] = []
@@ -725,8 +733,8 @@ def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
     cost_backbone = _cost_backbone_rows(ledgers)
 
     write_csv(out_dir / "real_ablation.csv", cells)
-    write_csv(out_dir / "real_cost_summary.csv", cost_summary)
-    write_csv(out_dir / "real_cost_ledger.csv", cost_backbone)
+    write_csv(out_dir / "real_ablation_cost_summary.csv", cost_summary)
+    write_csv(out_dir / "real_ablation_cost_ledger.csv", cost_backbone)
     prov = RunProvenance(
         run_id="real_ablation",
         stage="ablation",

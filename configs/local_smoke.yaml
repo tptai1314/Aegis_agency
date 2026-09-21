@@ -1,0 +1,29 @@
+# LOCAL smoke-test config (Windows, dummy backend). Never report these outputs.
+# Real runs use configs/ec2_real_evaluation.yaml on EC2 with a real judge backend.
+
+experiment:
+  n_judges: 7
+  rules: [cmed, gmed, krum]
+  threshold: 0.5
+  attack: collusion
+  f: 2
+  calibrate: false        # harmbench has no benign slice -> keep tau fixed (no tau=1.0 noise)
+  seed: 0
+  n_seeds: 1              # smoke only; the real run uses 3+ for mean +/- std
+  measure_theory: true
+  measure_epsilon: true
+
+data:
+  root: D:\Data\benchmarks
+  benchmark: harmbench     # swap: advbench | injecagent | formal_injection | dan | second_order | benign
+  split: test
+  limit: 40                # smoke cap; 0 = all payloads
+
+judges:
+  backend: dummy           # SMOKE ONLY - ground-truth judge; real run uses openai_compat/anthropic/hf
+  backbones: [llama-3, qwen2.5, mistral, gpt-4o, claude-3.5]
+  model: meta-llama/Llama-3.1-8B-Instruct
+  endpoint: http://127.0.0.1:8001/v1
+  embedding_model: ""      # skip sentence-encoder for a fast smoke (m = 0, score-only)
+  isolation: true
+  cache_dir: outputs/smoke_verdict_cache   # separate from the real-run cache dir

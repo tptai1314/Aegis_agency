@@ -92,6 +92,29 @@ def parse_verdict_json(text: str, judge_id: int) -> tuple[int, float, str]:
     )
 
 
+def _judge_verdict_or_block(
+    text: str, judge_id: int, embedder: EmbeddingExtractor
+) -> Verdict:
+    """Parse judge output; on refusal/unparseable output, conservatively BLOCK.
+
+    A judge that refuses to answer the structured prompt in the presence of harmful
+    content has recognised the content as dangerous — refusing implies a block (it never
+    allows the candidate through unanswered). Without this fallback a single refusal
+    would crash the whole committee build.
+    """
+    try:
+        decision, score, rationale = parse_verdict_json(text, judge_id)
+    except VerdictParseError:
+        logger.warning(
+            "Judge %d output unparseable; treating as BLOCK (decision=1). text=%r",
+            judge_id,
+            text[:400],
+        )
+        decision, score, rationale = 1, 1.0, ""
+    embedding = embedder.embed(rationale)
+    return Verdict(decision=decision, score=score, embedding=embedding, judge_id=judge_id)
+
+
 def _coerce_decision(value: Any) -> int | None:
     if isinstance(value, bool):
         return int(value)
@@ -392,9 +415,7 @@ class OpenAICompatJudge(LLMJudgeAdapter):
             getattr(usage, "prompt_tokens", 0) or 0,
             getattr(usage, "completion_tokens", 0) or 0,
         )
-        decision, score, rationale = parse_verdict_json(text, judge_id)
-        embedding = self.embedder.embed(rationale)
-        return Verdict(decision=decision, score=score, embedding=embedding, judge_id=judge_id)
+        return _judge_verdict_or_block(text, judge_id, self.embedder)
 
 
 class AnthropicJudge(LLMJudgeAdapter):
@@ -464,9 +485,7 @@ class AnthropicJudge(LLMJudgeAdapter):
             getattr(usage, "input_tokens", 0) or 0,
             getattr(usage, "output_tokens", 0) or 0,
         )
-        decision, score, rationale = parse_verdict_json(text, judge_id)
-        embedding = self.embedder.embed(rationale)
-        return Verdict(decision=decision, score=score, embedding=embedding, judge_id=judge_id)
+        return _judge_verdict_or_block(text, judge_id, self.embedder)
 
 
 class HuggingFaceJudge(LLMJudgeAdapter):
@@ -528,9 +547,7 @@ class HuggingFaceJudge(LLMJudgeAdapter):
         self._record_cost(payload.payload_id, judge_id, elapsed, 0, 0)
         # Strip the echoed prompt before parsing the model's continuation.
         text = generated[len(prompt) :].strip()
-        decision, score, rationale = parse_verdict_json(text, judge_id)
-        embedding = self.embedder.embed(rationale)
-        return Verdict(decision=decision, score=score, embedding=embedding, judge_id=judge_id)
+        return _judge_verdict_or_block(text, judge_id, self.embedder)
 
 
 def build_real_judges(

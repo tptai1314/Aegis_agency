@@ -1,0 +1,29 @@
+# LOCAL real-RUN pilot config - Ollama (Windows, GPU RTX 3050). REAL LLM verdicts.
+# Judge backend = Ollama OpenAI-compatible API at http://localhost:11434/v1
+
+experiment:
+  n_judges: 7
+  rules: [cmed, gmed, krum]
+  threshold: 0.5
+  attack: collusion
+  f: 2
+  calibrate: false        # harmbench has no benign slice -> keep tau fixed
+  seed: 0
+  n_seeds: 1              # pilot only; full run uses 3+ seeds for mean +/- std
+  measure_theory: true
+  measure_epsilon: true
+
+data:
+  root: D:\Data\benchmarks
+  benchmark: harmbench     # swap: advbench | injecagent | formal_injection | dan | second_order | benign
+  split: test
+  limit: 40                # pilot cap (40 payload x 7 judges x 4 builds ~= 1120 LLM calls)
+
+judges:
+  backend: openai_compat   # -> Ollama /v1/chat/completions
+  backbones: [llama3.2:3b] # one downloaded Ollama model shared by all 7 judges (homogeneous jury)
+  model: llama3.2:3b       # must match `ollama list`
+  endpoint: http://localhost:11434/v1
+  embedding_model: all-MiniLM-L6-v2  # judge rationale embeddings (also the EC2 default)
+  isolation: true
+  cache_dir: outputs/ollama_pilot_cache   # REAL verdicts live here after this run
