@@ -2,6 +2,14 @@
 
 from aegis_agency.metrics.confidence_intervals import bootstrap_interval, wilson_interval
 from aegis_agency.metrics.cost import latency_parallel, latency_sequential, token_cost
+from aegis_agency.metrics.estimators import (
+    decision_margin,
+    epsilon_estimates,
+    honest_correlation,
+    honest_radius,
+    paired_bootstrap_mean_diff,
+    per_judge_flip_rates,
+)
 from aegis_agency.metrics.metrics import (
     asr_under_compromise,
     byzantine_tolerance_fraction,
@@ -36,6 +44,12 @@ __all__ = [
     "injection_flip_bound",
     "wilson_interval",
     "bootstrap_interval",
+    "honest_radius",
+    "decision_margin",
+    "honest_correlation",
+    "epsilon_estimates",
+    "per_judge_flip_rates",
+    "paired_bootstrap_mean_diff",
     "token_cost",
     "latency_parallel",
     "latency_sequential",

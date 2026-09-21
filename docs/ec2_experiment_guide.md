@@ -42,13 +42,27 @@ secrets** — read them from environment variables or a mounted secrets file.
 ## 4. Run the protocol (RQ1-RQ6)
 Replace the synthetic verdict generator with real judge verdicts (via the adapters), then:
 ```bash
-python scripts/run_experiment.py --config configs/experiment_template.yaml --stage calibrate --output outputs/real
-python scripts/run_experiment.py --config configs/experiment_template.yaml --stage evaluate --output outputs/real
-python scripts/run_experiment.py --config configs/experiment_template.yaml --stage ablate   --output outputs/real
-python scripts/make_plots.py --input outputs/real/evaluation_sweep.csv --output outputs/real/asr_vs_f.png --real
+python scripts/run_real_experiment.py evaluate --config configs/ec2_real_evaluation.yaml --output outputs/real
+```
+This runs the multi-seed f-sweep (mean +/- std over `experiment.n_seeds`), measures the
+theory constants (`measure_theory`) and Def 1 epsilon (`measure_epsilon`). Outputs:
+```
+outputs/real/real_evaluation_sweep.csv          # first-seed per-(f, method) metrics
+outputs/real/real_evaluation_summary.csv        # mean +/- std over seeds (Table 5/6 format)
+outputs/real/real_evaluation_significance.csv   # paired-bootstrap vs coordinator baseline
+outputs/real/real_theory_analysis.csv           # measured r / gamma / mu / rho, Thm 1 check
+outputs/real/real_isolation_epsilon.csv         # Def 1 epsilon (isolation on/off)
+```
+Plot the summary (mean ASR line):
+```bash
+python scripts/make_plots.py --input outputs/real/real_evaluation_summary.csv --output outputs/real/asr_vs_f.png --real
 ```
 Only pass `--real` to plots when the inputs are genuinely real, verified results; set
 `is_paper_result` in provenance only with documented provenance.
+
+> Cost note: `measure_epsilon` replays an injected payload against every judge under both
+> isolation settings (~2 extra judge calls per payload per judge). Set it `false` for a
+> first cheap smoke pass on EC2.
 
 ## 5. Record provenance
 Keep the `*provenance.json` files with every result, and update
