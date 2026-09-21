@@ -9,7 +9,15 @@ determinism (third-party libraries), call `set_global_seed(seed)`.
 ## Config capture
 Each runner writes a `*provenance.json` (see `utils/provenance.py`) recording:
 `run_id`, `stage`, `seed`, `config`, `data_source` (`synthetic`/`real`), `is_paper_result`
-(always `False` for synthetic runs), package version, Python version, and platform.
+(always `False` for synthetic runs), package version, Python version, and platform — plus
+the reproduction metadata an auditor needs:
+`git_commit` (code at run time), `command` (exact CLI invocation), `deps` (numpy/torch/
+openai/… versions), and `gpu` (device + CUDA, when torch is present). Secrets (API keys,
+tokens) are never captured.
+
+Before the first real run, fill `audits/preregistration_protocol.md` (frozen config, sanity
+checks, exact commands, amendment log); a run becomes a paper result only after its numbers
+reproduce independently and `is_paper_result` is set true with the audit updated.
 
 ## Result provenance
 - Tables/plots are always generated **from result files**, never from hard-coded numbers.

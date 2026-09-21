@@ -8,6 +8,7 @@ import numpy as np
 from aegis_agency.data.schemas import Payload
 from aegis_agency.experiments.harness import TrialConfig, run_trial
 from aegis_agency.judges.synthetic_judges import SyntheticJudgePopulation
+from aegis_agency.utils.provenance import RunProvenance
 
 
 def test_same_seed_same_committee():
@@ -39,3 +40,18 @@ def test_no_committed_result_files_claim_paper_results():
     for prov in outputs.rglob("*provenance*.json"):
         data = json.loads(prov.read_text())
         assert data.get("is_paper_result") is False, f"{prov} claims a paper result!"
+
+
+def test_provenance_captures_reproduction_metadata():
+    prov = RunProvenance(run_id="unit", stage="evaluate", seed=0, config={"a": 1}, data_source="real")
+    rec = prov.to_dict()
+    # The audit needs the exact code + command + environment to reproduce a run.
+    assert rec["git_commit"] and rec["git_commit"] != "not-a-git-repo"
+    assert rec["command"]  # the invoking command line
+    assert rec["aegis_version"]  # installed package version, e.g. 0.1.0
+    assert isinstance(rec["deps"], dict) and "numpy" in rec["deps"]
+    assert isinstance(rec["gpu"], str)
+    assert rec["is_paper_result"] is False
+    # Secrets must never leak into provenance keys/values.
+    blob = json.dumps(rec).lower()
+    assert "api_key" not in blob and "token" not in blob
