@@ -22,8 +22,14 @@ outputs/**
 # OS
 .DS_Store
 
-# Real data must NEVER be committed (place on EC2 only).
-data/
+# Real data mounts must NEVER be committed (place on EC2 only).
+# Anchored to the repo root so the src/aegis_agency/data/ package is still tracked.
+/data/
 *.ckpt
 *.safetensors
 *.bin
+
+# Vietnamese translation (local only — NEVER commit)
+README.vi.md
+docs/vi/
+manuscript_vi/

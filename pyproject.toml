@@ -24,6 +24,21 @@ dev = [
     "mypy>=1.8",
     "pandas>=2.0",
 ]
+# Judge backends (EC2). installed separately; the package core stays dependency-light.
+llm = [
+    "openai>=1.30",
+    "anthropic>=0.30",
+    "transformers>=4.40",
+    "sentence-transformers>=2.7",
+]
+# Full EC2 stack: LLM backends plus vLLM for self-hosted open models.
+ec2 = [
+    "openai>=1.30",
+    "anthropic>=0.30",
+    "transformers>=4.40",
+    "sentence-transformers>=2.7",
+    "vllm>=0.5; sys_platform == 'linux'",
+]
 
 [project.scripts]
 aegis-agency = "aegis_agency.cli:main"
@@ -48,6 +63,6 @@ select = ["E", "F", "I", "W"]
 ignore = ["E501"]
 
 [tool.mypy]
-python_version = "3.11"
+python_version = "3.12"
 ignore_missing_imports = true
 warn_unused_ignores = false

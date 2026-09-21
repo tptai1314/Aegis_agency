@@ -14,6 +14,7 @@ def test_submodule_imports():
         "aegis_agency.data.schemas",
         "aegis_agency.data.synthetic",
         "aegis_agency.data.adapters",
+        "aegis_agency.data.real_judges",
         "aegis_agency.judges.base",
         "aegis_agency.judges.synthetic_judges",
         "aegis_agency.judges.isolation",
@@ -30,6 +31,7 @@ def test_submodule_imports():
         "aegis_agency.metrics.cost",
         "aegis_agency.baselines.autodefense",
         "aegis_agency.experiments.harness",
+        "aegis_agency.experiments.run_real",
         "aegis_agency.cli",
     ]:
         assert importlib.import_module(mod) is not None

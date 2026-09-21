@@ -1,0 +1,29 @@
+# Real-data evaluation config for EC2. Copy and edit for a specific run.
+# Nothing here is downloaded automatically: datasets and model weights must already exist.
+
+experiment:
+  n_judges: 7
+  rules: [cmed, gmed, krum]
+  threshold: 0.5
+  escalate_band: 0.05    # enable escalation band delta
+  attack: collusion       # replay: none | compromise | collusion | injection | adaptive
+  f: 2
+  calibrate: true         # calibrate tau per method on the first 1/4 of payloads (target ORR)
+  target_orr: 0.05
+  seed: 0
+
+data:
+  root: /data/benchmarks           # mount containing the benchmark directories
+  benchmark: harmbench             # harmbench | advbench | injecagent | formal_injection | dan | second_order | benign
+  split: test
+  limit: 0                         # 0 = all payloads; use e.g. 200 to smoke-test first
+
+judges:
+  backend: openai_compat           # openai_compat | anthropic | hf | dummy
+  backbones: [llama-3, qwen2.5, mistral, gpt-4o, claude-3.5]
+  model: meta-llama/Llama-3.1-8B-Instruct   # served by vLLM on :8001 (openai_compat/hf path)
+  endpoint: http://127.0.0.1:8001/v1
+  api_key_env: OPENAI_API_KEY
+  embedding_model: all-MiniLM-L6-v2        # "" disables embeddings (m = 0, score-only verdicts)
+  isolation: true
+  cache_dir: outputs/real_verdict_cache     # JSONL honest-verdict cache (reuse across runs)
