@@ -3,9 +3,16 @@
 
     python scripts/run_real_experiment.py evaluate \
         --config configs/ec2_real_evaluation.yaml --output outputs/real
+    python scripts/run_real_experiment.py ablate \
+        --config configs/ec2_real_evaluation.yaml --output outputs/real
     # offline plumbing check (never report):
     python scripts/run_real_experiment.py evaluate \
         --config configs/ec2_real_evaluation.yaml --output outputs/real --backend dummy --limit 40
+
+Commands:
+    evaluate  f-sweep + summary + significance + theory + epsilon (Tables 5/6).
+    ablate    component ablations on real verdicts (Table 6): robust agg on/off,
+              committee size, isolation on/off (epsilon), measured diversity.
 
 Options:
     --config   YAML with sections experiment:/data:/judges: (see configs/ec2_real_evaluation.yaml).
@@ -24,11 +31,20 @@ import argparse
 from pathlib import Path
 
 from aegis_agency.cli import add_common_run_args, add_real_run_args
-from aegis_agency.experiments.run_real import parse_real_config, run_real_evaluation
+from aegis_agency.experiments.run_real import (
+    parse_real_config,
+    run_real_ablation,
+    run_real_evaluation,
+)
 from aegis_agency.utils.io import load_yaml
 from aegis_agency.utils.logging import configure_logging, get_logger
 
 logger = get_logger(__name__)
+
+_RUNNERS = {
+    "evaluate": run_real_evaluation,
+    "ablate": run_real_ablation,
+}
 
 
 def main() -> int:
@@ -36,9 +52,14 @@ def main() -> int:
         description="Aegis-Agency real-data evaluation on EC2 (adapters; never auto-download)."
     )
     sub = ap.add_subparsers(dest="command", required=True)
-    ev = sub.add_parser("evaluate", help="Run the real benchmark evaluation (sweep + summary + theory + epsilon).")
-    add_common_run_args(ev, output_default="outputs/real")
-    add_real_run_args(ev)
+    commands = [
+        ("evaluate", "Run the real benchmark evaluation (sweep + summary + theory + epsilon)."),
+        ("ablate", "Run the component ablations on real verdicts (Table 6)."),
+    ]
+    for name, help_text in commands:
+        p = sub.add_parser(name, help=help_text)
+        add_common_run_args(p, output_default="outputs/real")
+        add_real_run_args(p)
     args = ap.parse_args()
 
     path = Path(args.config) if args.config else None
@@ -53,10 +74,11 @@ def main() -> int:
         cfg.backend = args.backend
     if args.limit:
         cfg.limit = args.limit
-    run_real_evaluation(cfg, args.output)
+    _RUNNERS[args.command](cfg, args.output)
     logger.info(
-        "Real evaluation complete; outputs in %s (is_paper_result=False until the paper's "
+        "Real '%s' complete; outputs in %s (is_paper_result=False until the paper's "
         "verification checklist is applied).",
+        args.command,
         args.output,
     )
     return 0

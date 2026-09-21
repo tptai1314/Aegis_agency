@@ -115,10 +115,14 @@ end cheaply, then enable it for the final run.
 ```bash
 bash scripts/ec2/run_real.sh smoke     # dummy judge, 40 payloads — plumbing only
 bash scripts/ec2/run_real.sh full      # the real run + asr_vs_f.png
+bash scripts/ec2/run_real.sh ablate    # Table 6 cells (reuses the honest cache)
 ```
 
 `smoke` uses the ground-truth `dummy` judge — **never report those outputs**. `full` runs the
 multi-seed f-sweep (mean ± std), theory measurement, and ε, then plots `asr_vs_f.png`.
+`ablate` computes the component ablations on the cached honest verdicts — it makes **no** new
+honest judge calls (and no attack calls); only the isolation cells replay the injected payload,
+which the ε pass already cached. Run it after `full`.
 
 Outputs in `outputs/real/`:
 
@@ -128,13 +132,17 @@ real_evaluation_summary.csv        # mean ± std over seeds (Table 5/6 format)
 real_evaluation_significance.csv   # paired-bootstrap vs coordinator baseline
 real_theory_analysis.csv           # r / gamma / mu / rho + Thm 1 check
 real_isolation_epsilon.csv         # Def 1 epsilon (isolation on/off)
+real_ablation.csv                  # Table 6: agg on/off, committee n, isolation, ρ(measured)
 real_evaluation_provenance.json    # data_source=real; is_paper_result=False
+real_ablation_provenance.json      # same provenance contract for the ablation runs
 ```
 
 Manual alternative (equivalent):
 
 ```bash
 python scripts/run_real_experiment.py evaluate \
+    --config configs/ec2_real_evaluation.yaml --output outputs/real
+python scripts/run_real_experiment.py ablate \
     --config configs/ec2_real_evaluation.yaml --output outputs/real
 python scripts/make_plots.py \
     --input outputs/real/real_evaluation_summary.csv \

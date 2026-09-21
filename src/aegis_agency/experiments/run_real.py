@@ -456,6 +456,221 @@ def _finite(v: float) -> bool:
     return bool(np.isfinite(v))
 
 
+# -------------------------------------------------------------------- ablation (Table 6)
+_ABLATION_COLUMNS = (
+    "ablation",
+    "method",
+    "n_judges",
+    "f",
+    "asr_uc",
+    "orr",
+    "defense_success_rate",
+    "epsilon_decision",
+    "score_shift",
+    "rho",
+    "score_rho",
+    "note",
+)
+
+
+def _abl_row(
+    label: str,
+    method: str,
+    n_judges: int,
+    f: float,
+    metrics: dict[str, float] | None = None,
+    *,
+    epsilon_decision: float = nan,
+    score_shift: float = nan,
+    rho: float = nan,
+    score_rho: float = nan,
+    note: str = "",
+) -> dict[str, Any]:
+    """Build one ablation CSV row; every row shares the same schema (column order fixed)."""
+    m = metrics or {}
+    return {
+        "ablation": label,
+        "method": method,
+        "n_judges": int(n_judges),
+        "f": f,
+        "asr_uc": m.get("asr_uc", nan),
+        "orr": m.get("orr", nan),
+        "defense_success_rate": m.get("defense_success_rate", nan),
+        "epsilon_decision": epsilon_decision,
+        "score_shift": score_shift,
+        "rho": rho,
+        "score_rho": score_rho,
+        "note": note,
+    }
+
+
+def _cell_metrics(
+    cfg: RealRunConfig,
+    honest_by_payload: dict[str, list[Verdict]],
+    eval_payloads: Sequence[Payload],
+    *,
+    n_judges: int,
+    rules: Sequence[str],
+    attack: Attack | None,
+    f: int,
+) -> dict[str, dict[str, float]]:
+    """Evaluate each pipeline once on the (truncated) honest committee (no LLM calls)."""
+    rng = np.random.default_rng(cfg.seed)
+    pipelines = build_pipelines(
+        TrialConfig(
+            n_judges=n_judges,
+            rules=tuple(rules),
+            attack=cfg.attack,
+            f=f,
+            threshold=cfg.threshold,
+            escalate_band=cfg.escalate_band,
+            seed=cfg.seed,
+        )
+    )
+    out: dict[str, dict[str, float]] = {}
+    for name, pipe in pipelines.items():
+        results: list = []
+        labels: list[int] = []
+        for p in eval_payloads:
+            honest = list(honest_by_payload[p.payload_id])[:n_judges]
+            tampered = attack.apply(honest, p, f, rng) if attack is not None else honest
+            results.append(pipe.decide(tampered, p, rng))
+            labels.append(int(p.true_label))
+        out[name] = {
+            "asr_uc": asr_under_compromise(results, labels),
+            "orr": over_refusal_rate(results, labels),
+            "defense_success_rate": defense_success_rate(results, labels),
+        }
+    return out
+
+
+def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
+    """Run the component ablations on REAL honest verdicts (Table 6).
+
+    Unlike the evaluate stage this holds the threshold fixed (tau = cfg.threshold) so each
+    cell isolates one component -- mirrors the synthetic :func:`run_ablation`. Honest verdicts
+    come from the verdict cache, so re-running after an evaluate pass costs no LLM calls;
+    only the isolation cells replay the injected payload (cached separately by
+    ``measure_epsilon``).
+    """
+    rng = np.random.default_rng(cfg.seed)
+    out_dir = ensure_dir(Path(output_dir))
+    cache_dir = Path(cfg.cache_dir)
+
+    benchmark_dir = resolve_benchmark_dir(cfg.benchmark)
+    adapter = CsvBenchmarkAdapter(root=Path(cfg.data_root) / benchmark_dir, split=cfg.split)
+    payloads = list(adapter.iter_payloads())
+    if cfg.limit and cfg.limit > 0:
+        payloads = payloads[: cfg.limit]
+    if not payloads:
+        raise ValueError(f"Benchmark {cfg.benchmark!r} yielded no payloads at {cfg.data_root}.")
+    logger.info("Ablation: %d payload(s) from %s (%s).", len(payloads), benchmark_dir, cfg.benchmark)
+
+    members = _build_committee(cfg, cache_dir, cfg.isolation, cache_name=f"{cfg.benchmark}_honest.jsonl")
+    attack_cls = ATTACKS[cfg.attack]
+    attack_kwargs = dict(cfg.attack_kwargs)
+    if cfg.attack == "collusion" and "radius" not in attack_kwargs:
+        attack_kwargs["radius"] = 0.1
+    attack = attack_cls(**attack_kwargs) if attack_cls is not None else None
+    collude_cls = ATTACKS["collusion"]
+    collusion_kwargs: dict[str, Any] = {"radius": 0.1}
+    collusion = collude_cls(**collusion_kwargs) if collude_cls is not None else None
+
+    honest_by_payload: dict[str, list[Verdict]] = {}
+    for p in payloads:
+        honest_by_payload[p.payload_id] = honest_committee(members, p, rng)
+    eval_payloads = payloads
+
+    cells: list[dict[str, Any]] = []
+
+    # --- robust aggregation on/off (Aegis gmed vs coordinator mean) ---
+    met_on = _cell_metrics(
+        cfg, honest_by_payload, eval_payloads, n_judges=cfg.n_judges, rules=("gmed",), attack=attack, f=cfg.f
+    )
+    cells.append(
+        _abl_row("robust_agg_on", "aegis_gmed", cfg.n_judges, cfg.f, met_on.get("aegis_gmed"))
+    )
+    met_off = _cell_metrics(
+        cfg, honest_by_payload, eval_payloads, n_judges=cfg.n_judges, rules=("gmed",), attack=attack, f=cfg.f
+    )
+    cells.append(
+        _abl_row("robust_agg_off", "autodefense", cfg.n_judges, cfg.f, met_off.get("autodefense"))
+    )
+
+    # --- committee size (re-aggregate cached verdicts; no new judge calls) ---
+    for n in (1, 3, 5, 7):
+        f_cell = min(cfg.f, (n - 1) // 2) if n > 1 else 0
+        met = _cell_metrics(
+            cfg, honest_by_payload, eval_payloads, n_judges=n, rules=("gmed",), attack=collusion, f=f_cell
+        )
+        cells.append(_abl_row(f"committee_n{n}", "aegis_gmed", n, f_cell, met.get("aegis_gmed")))
+
+    # --- payload isolation on/off -> Def 1 epsilon (replays the injected payload) ---
+    if cfg.measure_epsilon and eval_payloads:
+        eps = _epsilon_rows(cfg, eval_payloads, members, rng)
+        for iso in (True, False):
+            row = next(
+                (r for r in eps if r["isolation"] == iso and r["level"] == "overall"), None
+            )
+            if row is not None:
+                cells.append(
+                    _abl_row(
+                        f"isolation_{'on' if iso else 'off'}",
+                        "aegis_gmed",
+                        cfg.n_judges,
+                        nan,
+                        epsilon_decision=row["epsilon_decision"],
+                        score_shift=row["score_shift"],
+                        note="Def 1 leak rate under a second-order injection (RQ2)",
+                    )
+                )
+
+    # --- diversity: measured honest correlation (RQ4 evidence) ---
+    corr = honest_correlation(
+        [honest_by_payload[p.payload_id] for p in eval_payloads],
+        [int(p.true_label) for p in eval_payloads],
+    )
+    cells.append(
+        _abl_row(
+            "diverse_backbones",
+            "aegis_gmed",
+            cfg.n_judges,
+            nan,
+            rho=corr["rho"],
+            score_rho=corr["score_rho"],
+            note="measured honest error correlation rho / score rho (RQ4)",
+        )
+    )
+
+    write_csv(out_dir / "real_ablation.csv", cells)
+    prov = RunProvenance(
+        run_id="real_ablation",
+        stage="ablation",
+        seed=cfg.seed,
+        config={
+            "n_judges": cfg.n_judges,
+            "benchmark": cfg.benchmark,
+            "benchmark_dir": benchmark_dir,
+            "n_payloads": len(payloads),
+            "backend": cfg.backend,
+            "backbones": list(cfg.backbones),
+            "model": cfg.model,
+            "embedding_model": cfg.embedding_model,
+            "isolation": cfg.isolation,
+            "threshold": cfg.threshold,
+            "measure_epsilon": cfg.measure_epsilon,
+        },
+        data_source="real",
+        note=(
+            "Real-verdict ablation output. Leave is_paper_result=False until the paper's "
+            "verification checklist is applied and the run is independently reproduced."
+        ),
+    )
+    write_json(out_dir / "real_ablation_provenance.json", prov.to_dict())
+    logger.info("Wrote %d ablation rows to %s (real verdicts).", len(cells), out_dir / "real_ablation.csv")
+    return {"rows": cells, "provenance": prov.to_dict(), "n_cached": len(members[0].cache) if members else 0}
+
+
 # --------------------------------------------------------------------------------- runner
 def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
     """Run the real evaluation (multi-seed sweep + theory + epsilon); returns metrics."""

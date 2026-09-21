@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
-# Run the real-data evaluation on EC2: smoke first, then the full paper run.
+# Run the real-data evaluation on EC2: smoke first, then the full paper run + ablation.
 # Run from the repository root on the server:
 #   bash scripts/ec2/run_real.sh smoke   # capped, fast plumbing check
 #   bash scripts/ec2/run_real.sh full    # the real run (Tables 5/6)
+#   bash scripts/ec2/run_real.sh ablate  # component ablations on real verdicts (Table 6)
 set -euo pipefail
 
 MODE="${1:-full}"
@@ -34,8 +35,13 @@ case "$MODE" in
     echo "Real outputs + provenance in $OUT. is_paper_result=False until verified."
     echo "Next: fill audits/result_integrity_audit.md and the Table 5/6 placeholders."
     ;;
+  ablate)
+    python scripts/run_real_experiment.py ablate \
+      --config "$CONFIG" --output "$OUT"
+    echo "Ablation rows + provenance in $OUT/real_ablation.csv. Reuses the honest cache."
+    ;;
   *)
-    echo "Usage: bash scripts/ec2/run_real.sh [smoke|full]" >&2
+    echo "Usage: bash scripts/ec2/run_real.sh [smoke|full|ablate]" >&2
     exit 1
     ;;
 esac

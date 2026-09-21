@@ -17,7 +17,11 @@ from aegis_agency.data.real_judges import (
     parse_verdict_json,
 )
 from aegis_agency.data.schemas import Decision, Payload, Verdict
-from aegis_agency.experiments.run_real import RealRunConfig, run_real_evaluation
+from aegis_agency.experiments.run_real import (
+    RealRunConfig,
+    run_real_ablation,
+    run_real_evaluation,
+)
 from aegis_agency.metrics.estimators import (
     decision_margin,
     epsilon_estimates,
@@ -219,6 +223,69 @@ class TestRealRunner:
         )
         with pytest.raises(ValueError):
             run_real_evaluation(cfg, tmp_path / "out2")
+
+
+class TestRealAblation:
+    def _make_benchmark(self, root):
+        rows = [
+            {"id": f"p{i}", "content": f"candidate {i}", "label": i % 2, "group": "test"} for i in range(24)
+        ]
+        write_csv(root / "harmbench" / "test.csv", rows)
+
+    def test_ablation_cells_and_uniform_schema(self, tmp_path):
+        data_root = tmp_path / "data"
+        self._make_benchmark(data_root)
+        cfg = RealRunConfig(
+            n_judges=5,
+            rules=("cmed", "gmed"),
+            attack="collusion",
+            f=1,
+            calibrate=False,
+            data_root=str(data_root),
+            benchmark="harmbench",
+            backend="dummy",
+            embedding_model="",
+            cache_dir=str(tmp_path / "cache"),
+            limit=24,
+        )
+        out = run_real_ablation(cfg, tmp_path / "out")
+        rows = out["rows"]
+        labels = {r["ablation"] for r in rows}
+        assert {"robust_agg_on", "robust_agg_off"} <= labels
+        assert {"committee_n1", "committee_n3", "committee_n5", "committee_n7"} <= labels
+        assert {"isolation_on", "isolation_off", "diverse_backbones"} <= labels
+        # Uniform schema: every row shares the same column order.
+        assert len({tuple(r.keys()) for r in rows}) == 1
+        # robust_agg_on must be the Aegis gmed pipeline; committee cells carry metrics.
+        on = next(r for r in rows if r["ablation"] == "robust_agg_on")
+        assert on["method"] == "aegis_gmed" and on["asr_uc"] == on["asr_uc"]
+        csv_path = tmp_path / "out" / "real_ablation.csv"
+        assert csv_path.exists()
+        header = csv_path.read_text(encoding="utf-8").splitlines()[0]
+        assert "ablation" in header and "epsilon_decision" in header and "score_rho" in header
+        assert out["provenance"]["stage"] == "ablation"
+        assert out["provenance"]["is_paper_result"] is False
+
+    def test_ablation_with_epsilon_off_skips_isolation_cells(self, tmp_path):
+        data_root = tmp_path / "data"
+        self._make_benchmark(data_root)
+        cfg = RealRunConfig(
+            n_judges=3,
+            rules=("gmed",),
+            attack="collusion",
+            f=1,
+            data_root=str(data_root),
+            benchmark="harmbench",
+            backend="dummy",
+            embedding_model="",
+            measure_epsilon=False,
+            cache_dir=str(tmp_path / "cache"),
+            limit=24,
+        )
+        out = run_real_ablation(cfg, tmp_path / "out")
+        labels = {r["ablation"] for r in out["rows"]}
+        assert "isolation_on" not in labels
+        assert "diverse_backbones" in labels
 
 
 class TestTheoryEstimators:
