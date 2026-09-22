@@ -3,8 +3,6 @@
 > Tài liệu này để **chuyển cho giảng viên / đơn vị cấp hạ tầng**. Phần §1 là bản ngắn để copy-paste vào email. Phần §2 trở đi là chi tiết kỹ thuật và biện luận.
 > Ngày soạn: 21/09/2026. Giá và thông số cần **kiểm tra lại tại thời điểm cấp phát**.
 >
-> ✅ **Cập nhật (hai giai đoạn):** không dùng `g6e.48xlarge` suốt — chia **Phase 1 Pilot `g6e.12xlarge` (4× L40S)** rồi **Phase 2 Production `g6e.48xlarge` (8× L40S)**, tổng **~$710–1.120**, tiết kiệm **~40%** (bảng chi tiết §3 và §7). Kèm hai việc bắt buộc: **xin quota GPU NGAY** (≤ 72 h) và **làm C-1 + C-2 trên máy local trước khi lên EC2** (§8, §10).
->
 > 📌 **Nếu thầy/cô đã đề xuất `g5.xlarge` / `g4dn.2xlarge` + 50 GB đĩa:** đọc **`ec2_spec_comparison.md`** trước — cấu hình đó trích từ chính `docs/ec2_experiment_guide.md` của repo (viết cho pilot), và có 3 điểm cần sửa (đĩa, số GPU, RAM). File đó có sẵn **email trả lời copy-paste được** ở §6.
 >
 > **Ba yêu cầu tối thiểu không thể bỏ, bất kể phương án nào:** đĩa **≥ 250 GB** · RAM hệ thống **≥ 32 GiB** · **≥ 4 GPU** (hoặc chấp nhận chậm hơn nhiều với 1 GPU).
@@ -17,25 +15,18 @@
 >
 > Em cần một server GPU để chạy thực nghiệm cho bài báo nộp hội nghị AAMAS 2027 (hạn nộp **08/10/2026**).
 >
-> **Cấu hình đề nghị — chia 2 giai đoạn (để không phải trả tiền GPU dư trong lúc setup/debug):**
+> **Cấu hình đề nghị:**
+> - **GPU:** 4× NVIDIA L40S (44 GB VRAM mỗi card, tổng **~179 GB**) — hoặc bất kỳ node nào có **≥ 4 GPU, mỗi GPU ≥ 40 GB VRAM**
+> - **CPU / RAM:** ≥ 48 vCPU, ≥ 384 GB RAM
+> - **Ổ cứng:** ≥ 250 GB SSD (ưu tiên NVMe)
+> - **Hệ điều hành:** Ubuntu 22.04 hoặc 24.04 + NVIDIA driver + **Docker có NVIDIA Container Toolkit**
+> - **Truy cập:** SSH từ IP của em; **không cần mở cổng nào khác ra internet** (em sẽ dùng SSH tunnel)
 >
-> **Phase 1 — Pilot: `g6e.12xlarge`** (4× NVIDIA L40S, ~178 GB VRAM) · **~$10,49/giờ**
-> - Tải trọng số, test pipeline, gỡ lỗi song song hoá, smoke test, calibrate
-> - Ước **25–35 giờ** → **~$260–370**
-> - 4 GPU đủ phục vụ **4 backbone** (Llama-3, Qwen2.5, Mistral, Gemma-2) ở bf16
+> **Tương đương trên AWS:** `g6e.12xlarge` (4× L40S), on-demand, khu vực `us-east-1`, **~$10,49/giờ**.
+> **Nếu không có L40S:** `p4de.24xlarge` (8× A100 80 GB) hoặc `g5.12xlarge` (4× A10G) — đều dùng được; `g5.12xlarge` rẻ hơn (~$5,67/giờ) nhưng em chỉ chạy được **3 backbone** thay vì 4 và phải nêu rõ hạn chế này trong bài.
+> **Nếu ngân sách cho phép và thầy/cô muốn dư dả hơn:** `g6e.48xlarge` (8× L40S, ~$30,13/giờ). Em **không cần** cấu hình này — `g6e.12xlarge` đã đủ cho toàn bộ thực nghiệm.
 >
-> **Phase 2 — Production: `g6e.48xlarge`** (8× NVIDIA L40S, ~357 GB VRAM) · **~$30,13/giờ**
-> - Uỷ ban đầy đủ **5–6 backbone**, ablation, chạy lại để tái lập
-> - Ước **15–25 giờ** → **~$450–750**
-> - 8 GPU cho phép thêm **SecAlign-8B** (multi-LoRA) + tuỳ chọn **Llama-70B** (FP8, TP=2)
->
-> **Tổng: ~$710–1.120** — tiết kiệm **~40%** so với chạy `g6e.48xlarge` suốt (vì ~30 giờ đầu chỉ dùng 1–4 GPU). Em sẽ **stop instance** khi không dùng.
->
-> **Thời lượng tổng:** ~40–60 giờ máy, rải rác trong 17 ngày (đã trừ stop/start).
->
-> **Quan trọng nhất — bắt đầu ngay, bất kể chọn phương án nào:** phải xin **tăng quota GPU** của tài khoản AWS **NGAY** (mặc định **0 vCPU** cho họ G/VT; hồ sơ có thể mất tới **72 giờ**). Trong lúc chờ, em sẽ triển khai **C-1 (song song hoá) + C-2 (retry/backoff)** trên máy local để pilot lên EC2 chạy trơn.
->
-> **Tương đương nếu không có L40S:** `p4de.24xlarge` (8× A100 80 GB) hoặc `p5.48xlarge` (8× H100) — em chỉ cần đổi cấu hình quantization.
+> **Thời lượng:** khoảng **60–80 giờ máy**, rải rác trong 17 ngày. Em sẽ **stop instance khi không dùng** để tiết kiệm (ước tính **~$650–850** tổng ở mức $10,49/giờ của `g6e.12xlarge`).
 >
 > **Em tự lo:** tài khoản HuggingFace và quyền truy cập các model, toàn bộ code, dữ liệu benchmark, và cấu hình phần mềm.
 >
@@ -51,12 +42,12 @@ Nếu trường có cluster GPU riêng (không phải AWS), đây là các yêu 
 
 | Hạng mục | Yêu cầu tối thiểu | Đề nghị | Vì sao |
 |---|---|---|---|
-| **GPU** | 4 GPU, mỗi GPU **≥ 40 GB VRAM** | **8 GPU × 44 GB** | Cần phục vụ **đồng thời** 5–7 model 7–9B cho uỷ ban thẩm phán. Xem §4 |
+| **GPU** | 4 GPU, mỗi GPU **≥ 40 GB VRAM** | **4 GPU × 44 GB** | Cần phục vụ **đồng thời** 4–5 model 7–9B cho uỷ ban thẩm phán. Xem §4 |
 | **VRAM tổng** | ≥ 178 GB | **≥ 320 GB** | Trọng số + KV cache + overhead |
 | **Kiến trúc GPU** | Không bắt buộc, nhưng **Ada Lovelace (L40S/L4) / Hopper (H100) / Blackwell** cho phép FP8 | L40S (sm_89) | A100 (sm_80) **không** hỗ trợ FP8 W8A8 — chỉ ảnh hưởng model 70B, không chặn |
-| **CPU** | ≥ 48 vCPU | ≥ 96 vCPU | vLLM staging + HTTP server, 5–7 tiến trình song song |
-| **RAM** | ≥ 384 GB | **≥ 768 GB** | Quy tắc: ≥ 1,5 × tổng dung lượng trọng số + 64 GB |
-| **Ổ cứng** | 300 GB SSD | **500 GB–1 TB NVMe** | Trọng số model ~65 GB (không có 70B) hoặc ~206 GB (có 70B) |
+| **CPU** | ≥ 48 vCPU | **48 vCPU** | vLLM staging + HTTP server, 4–5 tiến trình song song |
+| **RAM** | ≥ 384 GB | **384 GB** | Quy tắc: ≥ 1,5 × tổng dung lượng trọng số + 64 GB |
+| **Ổ cứng** | 250 GB SSD | **250 GB NVMe** | Trọng số 4 backbone + SecAlign ≈ **65 GB**, cộng Docker image ~10 GB |
 | **Mạng** | Ra internet để tải model | — | Tải ~65–206 GB từ HuggingFace |
 | **HĐH** | Ubuntu 22.04 / 24.04 | — | Tương thích vLLM tốt nhất |
 | **Container** | Docker + NVIDIA Container Toolkit | — | Cách triển khai chuẩn của vLLM |
@@ -69,45 +60,33 @@ Nếu trường có cluster GPU riêng (không phải AWS), đây là các yêu 
 
 Giá là snapshot **21/09/2026, khu vực us-east-1, on-demand** — cần kiểm tra lại.
 
-### Phương án đề nghị — hai giai đoạn
-
-**Phase 1 — Pilot**
+### Phương án đề nghị — ✅ CHỐT
 
 | | Thông số |
 |---|---|
 | **Instance** | **`g6e.12xlarge`** |
-| GPU | 4× NVIDIA L40S, 44 GB/card → **178 GB tổng** |
+| GPU | 4× NVIDIA L40S, 44 GiB/card → **179 GB tổng** |
 | vCPU / RAM | 48 vCPU / **384 GiB** |
-| Ổ cứng cục bộ | NVMe cục bộ + EBS gp3 gắn thêm (≥ 250 GB) |
-| Giá | **~$10,49/giờ** (us-east-1, on-demand) |
-| Dùng cho | Tải weights, test pipeline, debug song song hoá, smoke, calibrate (25–35 h) |
-
-**Phase 2 — Production**
-
-| | Thông số |
-|---|---|
-| **Instance** | **`g6e.48xlarge`** |
-| GPU | 8× NVIDIA L40S, 44 GB/card → **357 GB tổng** |
-| vCPU / RAM | 192 vCPU / **1.536 GiB** |
-| Ổ cứng cục bộ | 4× 1.900 GB NVMe (~7,6 TB, ephemeral) + EBS gp3 gắn thêm |
-| Giá | **~$30,13/giờ** (us-east-1, on-demand) |
-| Dùng cho | Uỷ ban 5–6 model, ablation, chạy lại/tái lập (15–25 h) |
+| Ổ cứng cục bộ | 3.800 GB NVMe (ephemeral) + EBS gp3 gắn thêm |
+| Giá | **~$10,49/giờ** (us-east-1, on-demand, snapshot 21/09/2026) |
 | FP8 | ✅ có (sm_89) |
 
-> **Tại sao không mở `g6e.48xlarge` từ đầu:** ~30 giờ đầu là setup/debug, chỉ dùng 1–4 GPU. Trả $30/giờ cho 8 GPU trong thời gian đó là lãng phí; `g6e.12xlarge` rẻ hơn ~3× cho cùng giai đoạn này. Sau khi pipeline chạy trơn mới cần đủ 8 GPU (hoặc tối thiểu 5–6) cho uỷ ban đầy đủ. Nếu buộc phải chọn trước, vẫn xin **quota cho size 48xlarge** để không phải xin lại khi sang Phase 2.
+**Vì sao 4 GPU là đủ:** tổng trọng số 4 backbone (Llama-3.1-8B, Qwen2.5-7B, Mistral-7B, Gemma-2-9B) + adapter SecAlign-8B = **~60 GiB**; KV cache ~20 GiB; overhead ~6 GiB → **~86 GiB / 179 GiB = 48% sử dụng**. Còn dư nhiều. Uỷ ban `n = 1..7` chạy được vì code đã hỗ trợ **lặp backbone** (`backbones[k % len(backbones)]`, `real_judges.py:576`) — 7 thẩm phán trên 4 backbone, **không cần sửa code**.
 
 ### Các phương án thay thế
 
 | Instance | GPU | VRAM tổng | Giá/giờ | Đánh giá |
 |---|---|---|---|---|
-| `g6e.24xlarge` | 4× L40S | 178 GB | ~$15,07 | ⚠️ **Tối thiểu** — phải giảm uỷ ban xuống 4–5 model, và phải dùng FP8 cho một số model (tạo confound, phải khai báo trong bài) |
-| `p4de.24xlarge` | 8× A100 80 GB | 640 GB | ~$27–32 *(ước tính — cần kiểm tra)* | ✅ **Thay thế tốt** — nhiều VRAM hơn, chạy được cả 70B ở bf16; chỉ mất FP8 (không cần) |
-| `p5.48xlarge` | 8× H100 | 640 GB | ~$55,04 | ✅ Dư sức, nhưng **đắt gấp đôi mà không nhanh hơn** — workload này không bị chặn bởi compute |
-| `g7e.48xlarge` | 8× RTX PRO 6000 | 768 GB | ~$33,14 | ⚠️ sm_120 còn lỗi vLLM đã biết; chỉ dùng nếu không còn lựa chọn |
-| `g6e.12xlarge` | 4× L40S | 178 GB | ~$10,49 | ✅ **Phase 1 — Pilot** (4 backbone bf16, 48 vCPU/384 GiB đủ cho setup/debug) |
-| ❌ `p4d.24xlarge` | 8× A100 40 GB | 320 GB | ~$21,96 | Không FP8, và 40 GB/card hơi chật |
-| ❌ `g5.48xlarge` | 8× A10G | 178 GB, 22 GB/card | ~$16,29 | 22 GB/card không đủ cho model 9B ở bf16 |
-| ❌ `g4dn.*` | T4, 16 GB/card | — | — | Quá nhỏ |
+| `g6e.48xlarge` | 8× L40S | 357 GB | ~$30,13 | ✅ **Dư dả** — thêm được Llama-3.3-70B và 2 GPU dự phòng. **Không cần thiết**; chỉ nhận nếu thầy/cô đề nghị |
+| `g5.12xlarge` | 4× A10G | 89 GB | ~$5,67 | ⚠️ **Tầng ngân sách** — chỉ chạy được **3 backbone** (Gemma-2-9B cần 27,7 GiB > 22 GiB/card nên không lọt); phải khai báo hạn chế |
+| `g6e.24xlarge` | 4× L40S | 178 GB | ~$15,07 | Cùng GPU với `g6e.12xlarge`, chỉ hơn CPU/RAM — **không cần**, 384 GiB RAM đã đủ |
+| `p4de.24xlarge` | 8× A100 80 GB | 640 GB | ~$27–32 *(ước tính)* | ✅ Thay thế tốt về mặt khoa học nếu không có L40S |
+| `p5.48xlarge` | 8× H100 | 640 GB | ~$55,04 | ✅ Dư sức, nhưng **đắt gấp 5 lần mà không nhanh hơn** — workload không bị chặn bởi compute |
+| `g7e.48xlarge` | 8× RTX PRO 6000 | 768 GB | ~$33,14 | ⚠️ sm_120 còn lỗi vLLM đã biết |
+| ❌ `p4d.24xlarge` | 8× A100 40 GB | 320 GB | ~$21,96 | Không FP8, 40 GB/card hơi chật |
+| ❌ `g5.48xlarge` | 8× A10G | 178 GB, 22 GB/card | ~$16,29 | 22 GB/card không đủ cho Gemma-2-9B |
+| ❌ `g4dn.2xlarge` | 1× T4 | 16 GB | ~$0,53 | **Không chạy được** model 8B ở bf16: trọng số đã chiếm 16,06 GB |
+| ❌ `g5.xlarge` | 1× A10G | 22 GB | ~$1,01 | Chỉ 1 model, và **RAM hệ thống chỉ 16 GiB** — chật khi nạp model |
 
 ### Nếu không dùng AWS
 
@@ -149,7 +128,7 @@ Bài báo nghiên cứu **an toàn của một uỷ ban gồm nhiều LLM agent*
 
 **Lưu trữ:**
 - Trọng số model: **~65 GB** (uỷ ban 5 model) hoặc **~206 GB** (nếu thêm Llama-70B).
-- Đề nghị **500 GB EBS gp3** với **1.000 MiB/s provisioned throughput** và **16.000 IOPS** (gp3 mặc định chỉ 125 MB/s và sẽ làm chậm việc nạp model).
+- Đề nghị **250 GB EBS gp3** với **1.000 MiB/s provisioned throughput** và **16.000 IOPS** (gp3 mặc định chỉ 125 MB/s và sẽ làm chậm việc nạp model).
 - `g6e.48xlarge` có sẵn **7,6 TB NVMe cục bộ** — nhanh hơn EBS nhiều, dùng làm bản làm việc; EBS là bản gốc (NVMe cục bộ **mất dữ liệu khi stop**).
 
 **Mạng / bảo mật:**
@@ -164,28 +143,19 @@ Bài báo nghiên cứu **an toàn của một uỷ ban gồm nhiều LLM agent*
 
 | Hạng mục | Thời gian | Ghi chú |
 |---|---|---|
-| *Phase 1 — Pilot (`g6e.12xlarge`)* | | |
 | Cài đặt + tải trọng số | 3–6 giờ | Tải không cần GPU nhưng vẫn tính giờ máy |
-| Dựng 4 vLLM server + LiteLLM + kiểm tra | 4–8 giờ | 4 backbone bf16 |
-| Gỡ lỗi song song hoá, smoke test, hiệu chuẩn | 15–25 giờ | Phần khó dự đoán nhất — chỉ tốn ~$10/h |
-| *Phase 2 — Production (`g6e.48xlarge`)* | | |
-| Nạp uỷ ban 5–6 model + serve 8 GPU | 1–2 giờ | 70B dùng FP8 TP=2 |
-| Chạy thực nghiệm chính + ablation | 2–4 giờ | **Bản thân suy luận chỉ ~10–15 phút mỗi sweep** |
+| Dựng 4 vLLM server + LiteLLM + kiểm tra | 4–8 giờ | |
+| Gỡ lỗi, chạy thử, hiệu chuẩn | 15–25 giờ | Phần khó dự đoán nhất |
+| Chạy thực nghiệm chính + ablation | 2–4 giờ | **Bản thân suy luận chỉ ~20 phút mỗi sweep** |
 | Chạy lại để tái lập | 2–4 giờ | |
-| Dự phòng | 10–15 giờ | |
-| **Tổng** | **~40–60 giờ máy** | rải trong 17 ngày |
+| Dự phòng | 15–25 giờ | |
+| **Tổng** | **~60–80 giờ máy** | rải trong 17 ngày |
 
-**Chi phí theo 2 giai đoạn (đề nghị):**
+**Chi phí `g6e.12xlarge`:** 60–80 giờ × ~$10,49 ≈ **$650–850**.
 
-| Giai đoạn | Instance | Giờ | Tỷ lệ | Chi phí |
-|---|---|---|---|---|
-| **Phase 1 — Pilot** | `g6e.12xlarge` (4× L40S) | 25–35 h × ~$10,49 | ~$260–370 |
-| **Phase 2 — Production** | `g6e.48xlarge` (8× L40S) | 15–25 h × ~$30,13 | ~$450–750 |
-| **Tổng** | | | | **~$710–1.120** |
-
-Tiết kiệm **~40%** so với dùng `g6e.48xlarge` suốt (~$1.500–2.200): ~30 giờ đầu chỉ dùng 1–4 GPU nên trả $30/h là lãng phí.
-
-> ⚠️ **Quan trọng:** để instance chạy 24/7 suốt 17 ngày sẽ tốn **~$12.300**. Em sẽ **stop instance** ngay sau mỗi phiên làm việc và chỉ start khi cần. Stop/start giữ nguyên ổ đĩa; chỉ mất thời gian nạp lại model (~10–20 phút).
+> ⚠️ **Quan trọng:** để instance chạy 24/7 suốt 17 ngày sẽ tốn **~$4.280**. Em sẽ **stop instance** ngay sau mỗi phiên làm việc và chỉ start khi cần. Stop/start giữ nguyên ổ đĩa; chỉ mất thời gian nạp lại model (~10–20 phút).
+>
+> Nếu ngân sách hạn chế, phương án `g6e.24xlarge` (4× L40S) giảm chi phí còn **~$750–1.100**, đổi lại em phải thu hẹp uỷ ban và khai báo hạn chế đó trong bài.
 
 ---
 
@@ -194,15 +164,14 @@ Tiết kiệm **~40%** so với dùng `g6e.48xlarge` suốt (~$1.500–2.200): ~
 **Em tự lo:**
 - Tài khoản HuggingFace + xin quyền truy cập 5 model (đang chờ duyệt thủ công)
 - Toàn bộ mã nguồn, pipeline dữ liệu (đã xong: 3.054 payload thật), cấu hình thực nghiệm
-- **Implement C-1 (song song hoá client) + C-2 (retry/backoff) trên máy local TRƯỚC khi lên EC2** — điều kiện để pilot chạy qua đêm không chết
 - Cài đặt phần mềm trong container, chạy và giám sát thực nghiệm
 - Soạn thảo bài báo và nộp
 
 **Cần từ thầy/cô / đơn vị hạ tầng:**
-- [ ] Instance đã được cấp theo §2–§3 (Phase 1 `g6e.12xlarge` trước, Phase 2 `g6e.48xlarge` sau)
-- [ ] **Xác nhận quota GPU đã được tăng NGAY HÔM NAY** — mặc định của AWS là **0 vCPU** cho họ "G and VT"; `g6e.48xlarge` cần **192 vCPU**, `g6e.12xlarge` cần **48 vCPU** trong bucket này. Xin **mức quota đủ cho size 48xlarge ngay từ đầu** để không phải xin lại khi sang Phase 2. Hồ sơ có thể mất **vài giờ đến 72 giờ**
+- [ ] Instance đã được cấp theo §2–§3
+- [ ] **Xác nhận quota GPU của tài khoản AWS đã được tăng** — mặc định của AWS là **0 vCPU** cho họ "G and VT"; `g6e.48xlarge` cần **192 vCPU** trong bucket này. Hồ sơ tăng quota có thể mất **vài giờ đến 72 giờ**. Nếu tài khoản đã có quota thì bỏ qua bước này
 - [ ] Thông tin SSH (host, user, key) và quyền `sudo`
-- [ ] Xác nhận ngân sách cho **~$710–1.120** (2 giai đoạn) hoặc phương án nhỏ hơn ở §7
+- [ ] Xác nhận ngân sách cho ~$650–850 (hoặc phương án nhỏ hơn ở §7)
 - [ ] Ưu tiên chọn AZ đã test có sẵn capacity — `InsufficientInstanceCapacity` rất phổ biến với họ GPU; nếu có thể, tạo **On-Demand Capacity Reservation** để giữ chỗ
 
 ---
@@ -219,13 +188,12 @@ Theo thứ tự ưu tiên:
 
 ---
 
-## §10. BỐN VIỆC PHẢI LÀM NGAY, KHÔNG CHỜ SERVER
+## §10. BA VIỆC PHẢI LÀM NGAY, KHÔNG CHỜ SERVER
 
-Bốn việc này không phụ thuộc vào server và **có thể mất nhiều ngày**, nên phải bắt đầu hôm nay:
+Ba việc này không phụ thuộc vào server và **có thể mất nhiều ngày**, nên phải bắt đầu hôm nay:
 
-1. **Xin tăng quota GPU** (nếu tài khoản chưa có) — tới 72 giờ. Xin mức đủ cho `g6e.48xlarge` (192 vCPU) ngay từ đầu để không phải xin lại khi sang Phase 2.
+1. **Xin tăng quota GPU** (nếu tài khoản chưa có) — tới 72 giờ.
 2. **Xin quyền truy cập HuggingFace** cho 5 model gated — duyệt **thủ công**, Meta là chậm nhất.
 3. **Email ban tổ chức AAMAS** (`aamas2027pcs@gmail.com`) — hạn đăng ký tác giả trên OpenReview (17/09/2026) **đã trôi qua**; cần xác nhận có được đăng ký muộn không.
-4. **Code C-1 + C-2 trên máy local** (không cần server): **C-1** — song song hoá client (lưu ý: giữ tuần tự cho run chính thức để tái lập tốt hơn, chỉ dùng song song cho pilot); **C-2** — retry/backoff + xử lý lỗi mạng. Đây là điều kiện để pilot đêm trên EC2 không bị chết giữa chừng.
 
 Trong lúc chờ, công việc **không cần GPU** vẫn tiến được: tải trọng số, viết lại bản thảo 8 trang, chuẩn bị pipeline. Dữ liệu benchmark **đã xong** (3.054 payload).

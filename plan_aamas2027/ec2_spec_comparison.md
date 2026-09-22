@@ -101,22 +101,74 @@ Tôi không muốn nói quá rằng "phải có 8 GPU". Về mặt kỹ thuật,
 
 ---
 
-## 5. KHUYẾN NGHỊ GỬI LẠI THẦY/CÔ
+## 5. ✅ KẾT LUẬN CUỐI CÙNG — CHỐT `g6e.12xlarge`
 
-Xin theo **hai tầng** để thầy/cô dễ duyệt — tầng thấp gần với cấu hình thầy/cô đã đọc, tầng cao là cái bài báo cần:
+> Tôi **hạ khuyến nghị của chính mình** từ 8 GPU xuống 4 GPU. Lý do ở §5.1.
 
-| Tầng | Cấu hình | Chi phí | Làm được gì |
+### 5.1 Phương án chốt
+
+| | |
+|---|---|
+| **Instance** | **`g6e.12xlarge`** |
+| GPU | **4× NVIDIA L40S**, 44 GiB/card → **179 GB VRAM** |
+| vCPU / RAM | 48 vCPU / **384 GiB** |
+| Đĩa | 3.800 GB NVMe cục bộ + **EBS gp3 250 GB** (provisioned 1.000 MiB/s, 16.000 IOPS) |
+| Giá | **~$10,49/giờ** (us-east-1, on-demand, snapshot 21/09/2026 12:51 UTC) |
+| Chi phí dự án | 60–80 giờ máy → **~$650–850** |
+
+### 5.2 Vì sao 4 GPU là đủ (đã kiểm tra bằng số)
+
+| Hạng mục | Dung lượng |
+|---|---|
+| Trọng số: Llama-3.1-8B (14,96) + Qwen2.5-7B (14,19) + Mistral-7B (13,50) + Gemma-2-9B (17,22) + SecAlign-8B LoRA (0,28) | **60,15 GiB** |
+| KV cache @ `--max-model-len 2048` × 16 seq | **20,25 GiB** |
+| Overhead vLLM (CUDA context, activation, ~1,5 GiB × 5 tiến trình) | **~6 GiB** |
+| **Tổng** | **~86 GiB / 179 GiB = 48%** |
+
+→ **Còn dư hơn một nửa.** Bố trí: GPU0 = Llama + SecAlign LoRA, GPU1 = Qwen, GPU2 = Mistral, GPU3 = Gemma.
+
+**Uỷ ban `n = 1..7` chạy được mà không cần sửa code** — đã kiểm chứng `src/aegis_agency/data/real_judges.py:576`: `backbone = backbones[k % len(backbones)]`. Với 4 backbone và `n_judges=7`, thẩm phán 5–6 lặp lại backbone 0–1 với `judge_id` khác nhau, nên verdict cache `(payload_id, judge_id, backbone)` vẫn tách bạch đúng.
+
+### 5.3 Vì sao tôi hạ từ 8 GPU xuống 4 GPU
+
+| Tiêu chí | `g6e.48xlarge` (8 GPU) | `g6e.12xlarge` (4 GPU) |
+|---|---|---|
+| Đáp ứng RQ1–RQ6 | ✅ | ✅ **như nhau** |
+| Thời gian một sweep | ~15 phút | ~20 phút — **không đáng kể** |
+| Chi phí | $30,13/giờ | **$10,49/giờ (rẻ 1/3)** |
+| vCPU cần xin quota | 192 | **48 (dễ được duyệt hơn nhiều)** |
+| Rủi ro `InsufficientInstanceCapacity` | Cao hơn | Thấp hơn |
+| Thứ 8 GPU mang lại gì | Llama-3.3-70B + 2 GPU dự phòng | — |
+
+**Llama-70B và GPU dự phòng là "nice-to-have", không phải điều kiện để bài đủ mạnh.** Với hạn nộp 17 ngày và việc thầy/cô kiểm soát ngân sách, một yêu cầu **rẻ hơn 3 lần và dễ duyệt hơn** có giá trị thực tế lớn hơn phần dư kia.
+
+### 5.4 Thứ tự ưu tiên khi thương lượng
+
+| # | Phương án | Giá/giờ | Đánh giá |
 |---|---|---|---|
-| **Tối thiểu** (gần với đề xuất của thầy/cô) | `g5.2xlarge` (1× A10G 22 GB, 32 GiB RAM) **+ đĩa ≥ 250 GB** | ~$1/giờ | Uỷ ban đa dạng **nếu** sửa code theo cách model-major. Chậm. RQ5 hạn chế |
-| **Tốt** | `g5.12xlarge` (4× A10G, 89 GiB VRAM, 192 GiB RAM) + đĩa 250 GB | ~$4–6/giờ | **4 thẩm phán đa dạng chạy song song** ở bf16. Đủ cho RQ1–RQ4. Rẻ hơn nhiều so với `g6e` |
-| **Đề nghị** | `g6e.48xlarge` (8× L40S, 357 GiB) + đĩa 500 GB | ~$30/giờ | Tất cả ở bf16, không confound, sweep 15 phút, có GPU dự phòng |
+| **1** | **`g6e.12xlarge`** (4× L40S) | ~$10,49 | ✅ **CHỐT** — đủ cho cả 4 đóng góp |
+| 2 | `g6e.48xlarge` (8× L40S) | ~$30,13 | Nhận nếu thầy/cô đề nghị; **không cần xin** |
+| 3 | `g5.12xlarge` (4× A10G) | ~$5,67 | Tầng ngân sách — chỉ **3 backbone** (Gemma-2-9B cần 27,7 GiB > 22 GiB/card nên không lọt) |
+| 4 | `g5.2xlarge` (1× A10G) + đĩa ≥250 GB | ~$1,01 | Dự phòng — cần sửa code (C-15), chậm hơn 6–12 giờ/lượt |
+| ❌ | `g5.xlarge` / `g4dn.2xlarge` | — | **Không dùng được** — xem §3 lý do 1–3 |
 
-> 💡 **Điểm thương lượng quan trọng:** `g5.12xlarge` (4× A10G) rẻ hơn `g6e.48xlarge` **khoảng 5–7 lần** mà vẫn làm được **RQ1–RQ4** — tức là 3 trong 4 đóng góp. Nếu ngân sách là vấn đề, **đây là lựa chọn cân bằng tốt nhất** và tôi khuyên bạn đề nghị tầng này trước.
+### 5.5 Ba yêu cầu tối thiểu không thể bỏ (bất kể phương án)
 
-**Bất kể chọn tầng nào, ba yêu cầu này không được bỏ:**
-1. **Đĩa ≥ 250 GB** (50 GB là không đủ — đây là điểm sai rõ ràng nhất)
-2. **RAM hệ thống ≥ 32 GiB**
-3. **Số GPU ≥ 4** (hoặc chấp nhận chậm hơn nhiều với 1 GPU)
+1. **Đĩa ≥ 250 GB** — 50 GB không đủ (cần ~80 GB tối thiểu)
+2. **RAM hệ thống ≥ 32 GiB** — `g5.xlarge` chỉ có 16 GiB, quá chật
+3. **GPU ≥ 4** (hoặc chấp nhận chậm hơn nhiều với 1 GPU + sửa code)
+
+### 5.6 Về các yêu cầu khác trong đề xuất của thầy/cô
+
+| Yêu cầu | Đánh giá |
+|---|---|
+| Ubuntu 22.04/24.04 | ✅ Giữ nguyên, đúng |
+| **CUDA 12.x** | ✅ **Hoàn toàn ổn** — dùng image `vllm/vllm-openai:v0.29.0-cu129` |
+| NVIDIA driver sẵn có | ✅ Đúng |
+| Mở SSH inbound key | ✅ Đúng — và **không mở cổng nào khác** |
+| `g5.xlarge` / `g4dn.2xlarge` | ❌ Cần nâng lên 4 GPU |
+| VRAM ≥ 16 GB | ⚠️ Đúng nhưng **không đủ** — cần **≥ 40 GB/card** để chứa model 9B |
+| Disk ≥ 50 GB | ❌ **Không đủ** — cần **≥ 250 GB** |
 
 ---
 
@@ -128,14 +180,16 @@ Xin theo **hai tầng** để thầy/cô dễ duyệt — tầng thấp gần v�
 >
 > **Vấn đề thứ nhất — đĩa 50 GB không đủ.** Cần nạp 5 model 7–9B, mỗi model ~15 GB ở bf16 (tổng ~65 GB), cộng Docker image vLLM (~10 GB). Em xin **≥ 250 GB**.
 >
-> **Vấn đề thứ hai — một GPU 16–22 GB không đủ.** Bài cần một uỷ ban gồm **5 thẩm phán khác backbone** (Llama / Qwen / Mistral / Gemma / SecAlign) để trả lời câu hỏi nghiên cứu về **tương quan lỗi giữa các model**. Đây là một trong bốn đóng góp của bài. Xin lưu ý thêm: `g4dn.2xlarge` (T4 16 GB) thực tế **không chạy được** model 8B ở bf16 vì trọng số đã chiếm 16,06 GB; và `g5.xlarge` chỉ có **16 GiB RAM hệ thống**, rất chật khi nạp model.
+> **Vấn đề thứ hai — một GPU 16–22 GB không đủ.** Bài cần một uỷ ban gồm **4–5 thẩm phán khác backbone** (Llama / Qwen / Mistral / Gemma / SecAlign) để trả lời câu hỏi nghiên cứu về **tương quan lỗi giữa các model**. Đây là một trong bốn đóng góp của bài. Xin lưu ý thêm: `g4dn.2xlarge` (T4 16 GB) thực tế **không chạy được** model 8B ở bf16 vì trọng số đã chiếm 16,06 GB; và `g5.xlarge` chỉ có **16 GiB RAM hệ thống**, rất chật khi nạp model.
 >
-> **Đề nghị của em, theo thứ tự ưu tiên:**
-> 1. **`g6e.48xlarge`** (8× L40S, 357 GB VRAM) + 500 GB đĩa — ~$30/giờ. Chạy mọi thứ ở bf16, một lượt thực nghiệm ~15 phút.
-> 2. **`g5.12xlarge`** (4× A10G, 89 GB VRAM, 192 GiB RAM) + 250 GB đĩa — **rẻ hơn 5–7 lần**, vẫn đủ cho 4 thẩm phán đa dạng và 3 trong 4 đóng góp. **Nếu ngân sách hạn chế, em đề nghị phương án này.**
-> 3. Nếu chỉ cấp được **một GPU**: xin `g5.2xlarge` (32 GiB RAM) + **đĩa ≥ 250 GB**. Em vẫn làm được nhưng phải chạy luân phiên từng model, mất thêm khoảng một ngày công và thời gian chạy dài hơn nhiều.
+> **Đề nghị của em: `g6e.12xlarge`** (4× NVIDIA L40S, 179 GB VRAM, 48 vCPU, 384 GiB RAM) + **đĩa 250 GB** — khoảng **$10,49/giờ**. Em đã tính toán và 4 GPU là **đủ và dư**: tổng trọng số 4 model + adapter chỉ chiếm ~60 GB, cộng KV cache và overhead là ~86 GB trên 179 GB (khoảng 48% sử dụng). Thời gian một lượt thực nghiệm đầy đủ khoảng **20 phút**.
 >
-> **Ba yêu cầu tối thiểu, không phụ thuộc phương án:** đĩa ≥ 250 GB · RAM ≥ 32 GiB · GPU ≥ 4 (hoặc chấp nhận chậm hơn với 1 GPU).
+> **Phương án thay thế:**
+> - Nếu **không có L40S**: `p4de.24xlarge` (8× A100 80 GB) dùng được, tương đương về mặt khoa học.
+> - Nếu **hạn chế ngân sách**: `g5.12xlarge` (4× A10G, 89 GB VRAM) rẻ hơn (~$5,67/giờ), nhưng em chỉ chạy được **3 backbone** thay vì 4 (model Gemma-2-9B cần 27,7 GB nên không vừa card 22 GB). Em sẽ nêu rõ hạn chế này trong bài.
+> - Em **không cần** `g6e.48xlarge` (8 GPU, ~$30/giờ) — cấu hình đó chỉ thêm một model lớn 70B và GPU dự phòng, không cần thiết cho bài.
+>
+> **Ba yêu cầu tối thiểu, không phụ thuộc phương án:** đĩa **≥ 250 GB** · RAM ≥ 32 GiB · **GPU ≥ 4** (hoặc chấp nhận chậm hơn nhiều với 1 GPU).
 >
 > Phần còn lại trong đề xuất ban đầu của em vẫn giữ nguyên: Ubuntu 22.04/24.04, NVIDIA driver sẵn có, Docker + NVIDIA Container Toolkit, và **chỉ mở cổng SSH** (em sẽ dùng SSH tunnel, không cần mở cổng GPU ra internet). Về CUDA: **CUDA 12.x là hoàn toàn ổn** — em sẽ dùng image `vllm/vllm-openai:v0.29.0-cu129`.
 >
@@ -151,9 +205,9 @@ Tài liệu `docs/ec2_experiment_guide.md:17-18` đang gây hiểu nhầm và **
 ## 1. Provision the server
 ### Pilot / plumbing-only (homogeneous committee, one backbone)
 e.g. `g5.2xlarge` (1x A10G 22 GB, 32 GiB RAM, >= 250 GB disk)
-### Paper-level experiments (diverse committee, 5-7 backbones served concurrently)
-Recommended: `g6e.48xlarge` (8x L40S, 357 GiB VRAM, 1536 GiB RAM, >= 500 GB disk)
-Adequate:    `g5.12xlarge` (4x A10G, 89 GiB VRAM, 192 GiB RAM, >= 250 GB disk)
+### Paper-level experiments (diverse committee, 4-5 backbones served concurrently)
+Recommended: `g6e.12xlarge` (4x L40S, 179 GiB VRAM, 384 GiB RAM, >= 250 GB disk)
+Alternative: `p4de.24xlarge` (8x A100 80GB) | Budget: `g5.12xlarge` (4x A10G, 89 GiB, 3 backbones only)
 See plan_aamas2027/ec2_runbook.md and plan_aamas2027/ec2_spec_comparison.md.
 ```
 

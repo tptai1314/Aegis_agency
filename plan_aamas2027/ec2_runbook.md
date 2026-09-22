@@ -17,7 +17,9 @@ Bổ trợ cho `TODO_AAMAS2027.md`. Giả định: **không giới hạn chi ph�
 
 | Instance | GPU | VRAM/GPU | Số GPU | Tổng VRAM | vCPU / RAM | $/giờ | FP8 W8A8? |
 |---|---|---|---|---|---|---|---|
-| **g6e.48xlarge** ✅ **CHỌN** | L40S | 44 GiB | 8 | **357 GiB** | 192 / 1536 GiB | **~$30.13** | ✅ sm_89 |
+| **g6e.12xlarge** ✅ **CHỌN** | L40S | 44 GiB | 4 | **179 GiB** | 48 / 384 GiB | **~$10,49** | ✅ sm_89 |
+| g6e.48xlarge | L40S | 44 GiB | 8 | 357 GiB | 192 / 1536 GiB | ~$30,13 | ✅ sm_89 |
+| g5.12xlarge | A10G | 22 GiB | 4 | 89 GiB | 48 / 192 GiB | ~$5,67 | ❌ sm_86 |
 | g7e.48xlarge | RTX PRO 6000 | 96 GiB | 8 | 768 GiB | 192 / 2048 GiB | ~$33.14 | ⚠️ sm_120, nhiều lỗi vLLM đã biết |
 | g6e.24xlarge | L40S | 44 GiB | 4 | 178 GiB | 96 / 768 GiB | ~$15.07 | ✅ |
 | g5.48xlarge | A10G | 22 GiB | 8 | 178 GiB | 192 / 768 GiB | ~$16.29 | ❌ sm_86 |
@@ -25,25 +27,27 @@ Bổ trợ cho `TODO_AAMAS2027.md`. Giả định: **không giới hạn chi ph�
 | p5.48xlarge | H100 | 80 GiB | 8 | 640 GiB | 192 / 2048 GiB | ~$55.04 | ✅ sm_90 |
 | g4dn.12xlarge | T4 | 16 GiB | 4 | 64 GiB | 48 / 192 GiB | ~$3.91 | ❌ sm_75 |
 
-**Vì sao không dùng p4d/A100:** vLLM chỉ hỗ trợ **FP8 W8A8** trên GPU compute capability ≥ 8.9 (Ada/Hopper/Blackwell). A100 là **sm_80** → không có W8A8, chỉ có W8A16 weight-only. L40S (sm_89) hỗ trợ đầy đủ. Đây là lý do lớn nhất để chọn g6e.
+**✅ Chốt `g6e.12xlarge`:** 4× L40S là **đủ và dư** — trọng số 4 backbone + adapter SecAlign ≈ **60 GiB**, KV cache ≈ **20 GiB**, overhead ≈ **6 GiB** → **~86 GiB / 179 GiB (48%)**. Rẻ hơn `g6e.48xlarge` **3 lần** và chỉ cần xin **48 vCPU** quota thay vì 192. Đầy đủ lý do ở `ec2_spec_comparison.md` §5.
 
-**Vì sao không dùng g5/g4dn:** không FP8, VRAM/GPU quá nhỏ cho 7–9B ở bf16.
+**Vì sao không dùng p4d/A100:** vLLM chỉ hỗ trợ **FP8 W8A8** trên GPU compute capability ≥ 8.9 (Ada/Hopper/Blackwell). A100 là **sm_80** → không có W8A8, chỉ có W8A16 weight-only. L40S (sm_89) hỗ trợ đầy đủ.
 
-**Lưu ý giá:** con số trên là snapshot **21/09/2026 12:51 UTC** — **kiểm tra lại lúc mua**.
+**Vì sao không dùng `g5.12xlarge` làm phương án chính:** A10G chỉ 22 GiB/card → **Gemma-2-9B không lọt** (17,22 GiB trọng số + 10,5 GiB KV = 27,7 GiB). Chỉ chạy được **3 backbone** thay vì 4 → chỉ dùng làm tầng ngân sách.
+
+**Vì sao không dùng `g5.xlarge` / `g4dn.2xlarge`:** `g4dn.2xlarge` (T4 16 GiB) **không chạy được** model 8B ở bf16 (trọng số đã chiếm 16,06 GB); `g5.xlarge` chỉ có **16 GiB RAM hệ thống** — quá chật khi nạp model.
+
+**Lưu ý giá:** snapshot **21/09/2026 12:51 UTC** (Holori) — **kiểm tra lại lúc mua**.
 
 ---
 
 ## 2. Bố trí serving
 
-**Nguyên tắc: TP=1, một model một GPU.** Mỗi model 7–9B nằm gọn trong một L40S 44 GiB ở bf16 → tensor parallelism không tiết kiệm VRAM mà chỉ thêm all-reduce qua PCIe. Chỉ dùng TP=2 cho model 70B.
+**Nguyên tắc: TP=1, một model một GPU.** Mỗi model 7–9B nằm gọn trong một L40S 44 GiB ở bf16 → tensor parallelism không tiết kiệm VRAM mà chỉ thêm all-reduce qua PCIe.
 
 ```
 GPU0   :8000  meta-llama/Llama-3.1-8B-Instruct      bf16   (+ LoRA: Meta-SecAlign-8B)
 GPU1   :8001  Qwen/Qwen2.5-7B-Instruct              bf16
 GPU2   :8002  mistralai/Mistral-7B-Instruct-v0.3    bf16
 GPU3   :8003  google/gemma-2-9b-it                  bf16
-GPU4-5 :8004  meta-llama/Llama-3.3-70B-Instruct     FP8, --tensor-parallel-size 2
-GPU6-7        dự phòng / bản sao cho judge chậm nhất
 :4000         LiteLLM proxy  <-- endpoint DUY NHẤT mà experiment nói chuyện
 ```
 
@@ -51,6 +55,8 @@ GPU6-7        dự phòng / bản sao cho judge chậm nhất
 - **LiteLLM, không dùng Ray Serve.** vLLM đã có continuous batching; Ray Serve thêm scheduler và một failure mode mới mà không tăng throughput ở quy mô này.
 - **Multi-LoRA chỉ dùng cho đúng một cặp:** `Meta-SecAlign-8B` trên server Llama-3.1-8B (adapter 281 MB). Qwen/Mistral/Gemma khác kiến trúc → không dùng chung base.
 - **Không bật `VLLM_SERVER_DEV_MODE=1`** trên cổng ra internet (mở `/sleep`, `/wake_up`, `/collective_rpc`). Bind vLLM vào `127.0.0.1`, chỉ mở LiteLLM (hoặc tunnel SSH).
+
+**Uỷ ban `n = 1..7` trên 4 GPU — không cần sửa code.** Đã kiểm chứng `src/aegis_agency/data/real_judges.py:576`: `backbone = backbones[k % len(backbones)]`. Với 4 backbone và `n_judges=7`, thẩm phán 5–6 lặp lại backbone 0–1 với `judge_id` khác nhau, nên verdict cache `(payload_id, judge_id, backbone)` vẫn tách bạch đúng. Đây cũng là cách một triển khai thật sẽ làm (nhiều thẩm phán trên vài backbone).
 
 **Cấu hình then chốt cho MỌI server:**
 ```
@@ -71,7 +77,7 @@ GPU6-7        dự phòng / bản sao cho judge chậm nhất
 | Judge đa dạng | `Qwen/Qwen2.5-7B-Instruct` | `a09a35458c702b33eeacc393d103063234e8bc28` | ✅ mở | |
 | Judge đa dạng | `mistralai/Mistral-7B-Instruct-v0.3` | `c170c708c41dac9275d15a8fff4eca08d52bab71` | ✅ mở | |
 | Judge đa dạng | `google/gemma-2-9b-it` | `11c9b309abf73637e4b6f9a3fa1e92e615547819` | 🔒 **manual** | ⚠️ xem landmine §7 |
-| Judge mạnh | `meta-llama/Llama-3.3-70B-Instruct` | `6f6073b423013f6a7d4d9f39144961bfbfbc386b` | 🔒 **manual** | FP8, TP=2 |
+| Judge mạnh *(tuỳ chọn, cần 8 GPU)* | `meta-llama/Llama-3.3-70B-Instruct` | `6f6073b423013f6a7d4d9f39144961bfbfbc386b` | 🔒 **manual** | FP8, TP=2. **Không cần cho `g6e.12xlarge`** |
 
 **Về SecAlign gốc (Chen et al., CCS 2025):** checkpoint gốc **KHÔNG có trên HuggingFace Hub** — chúng là file zip trên CDN của Meta (`dl.fbaipublicfiles.com/SecAlign/...`), tải bằng `python setup.py`. Có cả bản LoRA (~0.2 GB) và bản full weight (26–30 GB), base: Llama-7B / Mistral-7B-v0.1 / Meta-Llama-3-8B. **Repo SecAlign là slurm-oriented** → phải tự tích hợp, không có `from_pretrained` một dòng.
 **StruQ:** cũng chỉ trên CDN, base `huggyllama/llama-7b` và `mistralai/Mistral-7B-v0.1`, full weight. README của StruQ **tự nói repo đã bị thay thế** và trỏ sang SecAlign.
