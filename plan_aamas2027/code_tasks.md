@@ -63,12 +63,12 @@ Mọi kết luận dưới đây được **kiểm chứng trực tiếp từ m�
 **Acceptance:** có con số tỷ lệ parse lỗi theo từng backbone, xuất hiện trong artefact và trong bài.
 *Effort: 2–3 h.*
 
-### C-4 🟠 Làm rõ "second-order injection" là một **tấn công cố định**, không phải JudgeDeceiver tối ưu
-**Hiện trạng:** `run_real.py:85` định nghĩa một `DEFAULT_INJECTED_SUFFIX` duy nhất, chèn vào payload (`:457`) rồi hỏi lại judge. Đây là **đo `ε` thật** (tốt!), nhưng **không** phải JudgeDeceiver (không có tối ưu hoá lặp để đánh lừa judge).
+### C-4 ⚠️ Làm rõ "second-order injection" là một **benchmark với suffix cố định (đã tối ưu)**, không phải JudgeDeceiver-optimiser đang chạy
+**Hiện trạng:** `run_real.py:85` định nghĩa một `DEFAULT_INJECTED_SUFFIX` duy nhất, chèn vào payload (`:457`) rồi hỏi lại judge. ✅ **Đã bổ sung real payload** ở bước data: `second_order/test.csv` (2000 rows) dựng từ `dataset/results_suffix/basic/llmbar.json` của repo `ShiJiawenwen/JudgeDeceiver` (suffix gradient-tối ưu key `llama-3`) — đây là JudgeDeceiver **crafted** payloads (đo `ε` thật), nhưng **không** phải tối ưu hoá online: `JudgeDeceiverAdapter.inject()` vẫn là stub.
 **Việc (chọn 1 trong 2, và ghi rõ trong bài):**
-- (a) *Nhanh, đủ cho deadline:* giữ suffix cố định, **đổi cách gọi trong bài**: "a fixed second-order instruction-suffix injection" thay vì "JudgeDeceiver-style"; thêm 2–3 biến thể suffix để cho thấy kết quả không phụ thuộc một chuỗi duy nhất (tăng độ tin cậy, chi phí thấp).
+- (a) *Nhanh, đủ cho deadline:* dùng `second_order/test.csv` 2000 rows làm benchmark **JudgeDeceiver-crafted** (label chính xác từ results_suffix), **đổi cách gọi trong bài**: "second-order injection with the optimized suffix from JudgeDeceiver" thay vì ngụ ý có tối ưu hoá lặp tại runtime; thêm 2–3 biến thể suffix (so sánh `mistral`/`openchat_3.5`/`llama-2` keys) để cho thấy kết quả không phụ thuộc một chuỗi duy nhất (tăng độ tin cậy, chi phí thấp).
 - (b) *Đầy đủ:* implement `JudgeDeceiverAdapter.inject()` (tối ưu hoá lặp) — tốn thời gian, **không khuyến nghị** trong 17 ngày.
-**Acceptance:** bài không còn ngụ ý đã dùng JudgeDeceiver thật; có ≥ 2 biến thể injection với kết quả nhất quán.
+**Acceptance:** bài mô tả đúng cơ chế dữ liệu (benchmark dùng suffix đã tối ưu sẵn từ results_suffix, không có runtime optimisation); có ≥ 2 biến thể suffix với kết quả nhất quán.
 *Effort: 2 h (a) / 16 h+ (b).*
 
 ### C-5 🟠 Định nghĩa vận hành "hardened judges" để ablation Bảng 6 có nghĩa

@@ -1,0 +1,193 @@
+{
+  "created_utc": "2026-09-22T04:35:28.063436+00:00",
+  "schema": "id,content,label,group (docs/data_format.md)",
+  "note": "Public research datasets fetched from canonical GitHub sources.",
+  "benchmarks": {
+    "harmbench": {
+      "source_url": "https://raw.githubusercontent.com/centerforaisafety/HarmBench/main/data/behavior_datasets/harmbench_behaviors_text_test.csv",
+      "licence_note": "HarmBench (Mazeika et al., ICML 2024) — MIT (see repo). Research use.",
+      "family": "jailbreak",
+      "raw_file": "harmbench.csv",
+      "raw_sha256": "75d257b3e7428c52eb7b0154318f455af3e01b09a3794b5e2f3d36054f3c0e29",
+      "rows": 320,
+      "positives": 320,
+      "groups": {
+        "standard": 159,
+        "contextual": 81,
+        "copyright": 80
+      }
+    },
+    "advbench": {
+      "source_url": "https://raw.githubusercontent.com/llm-attacks/llm-attacks/main/data/advbench/harmful_behaviors.csv",
+      "licence_note": "AdvBench / GCG (Zou et al., 2023) — MIT (see repo). Research use.",
+      "family": "jailbreak",
+      "raw_file": "advbench.csv",
+      "raw_sha256": "6cd1a5c63c07610d7eb67307772ee5606017ee950b5770ab288a2c487489d3e1",
+      "rows": 520,
+      "positives": 520,
+      "groups": {
+        "advbench": 520
+      }
+    },
+    "dan": {
+      "source_url": "https://raw.githubusercontent.com/verazuo/jailbreak_llms/main/data/prompts/jailbreak_prompts_2023_12_25.csv",
+      "licence_note": "In-the-wild jailbreak prompts (Shen et al., ACM CCS 2024) — research use.",
+      "family": "jailbreak",
+      "raw_file": "dan.csv",
+      "raw_sha256": "accf97463de96c33c48453dfee9600191ff6fd5a0c43f3f11d5ebf98d1a5de55",
+      "rows": 1405,
+      "positives": 1405,
+      "groups": {
+        "flowgpt": 405,
+        "ChatGPT": 390,
+        "ChatGPTJailbreak": 225,
+        "jailbreak_chat": 79,
+        "LLM Promptwriting": 78,
+        "ChatGPT Prompt Engineering": 67,
+        "Spreadsheet Warriors": 61,
+        "BreakGPT": 32,
+        "aiprm": 25,
+        "ChatGPTPromptGenius": 24,
+        "AI Prompt Sharing": 17,
+        "awesome_chatgpt_prompts": 2
+      }
+    },
+    "injecagent": {
+      "source_url": "https://raw.githubusercontent.com/uiuc-kang-lab/InjecAgent/main/data/test_cases_dh_base.json",
+      "licence_note": "InjecAgent (Zhan et al., ACL Findings 2024) — MIT (see repo). Research use.",
+      "family": "injection",
+      "raw_file": "injecagent.json",
+      "raw_sha256": "0a8186468d21389af432e8c7b399ae42264d1b93a07b65c7a489468508604305",
+      "rows": 510,
+      "positives": 510,
+      "groups": {
+        "Data Security Harm": 187,
+        "Physical Harm": 170,
+        "Financial Harm": 153
+      }
+    },
+    "benign": {
+      "source_url": "https://raw.githubusercontent.com/verazuo/jailbreak_llms/main/data/prompts/regular_prompts_2023_12_25.csv",
+      "licence_note": "Regular (non-jailbreak) prompts, same corpus — research use.",
+      "family": "benign",
+      "raw_file": "benign_discord.csv",
+      "raw_sha256": "fb82e3f88fbd5d9c6edf8927b138510f339b85012cab24d41d13e1665a9c5819",
+      "rows": 299,
+      "positives": 0,
+      "groups": {
+        "benign_discord": 300
+      },
+      "dropped_overlapping_attack_text": 1
+    },
+    "second_order": {
+      "source": "ShiJiawenwen/JudgeDeceiver (ACM CCS 2024, arXiv:2403.17710)",
+      "repo": "D:\\Data\\downloads\\JudgeDeceiver",
+      "dataset": "LLMBar",
+      "files": {
+        "review_pairs": "dataset/data_for_eval/basic/llmbar/llmbar_test_{1..10}.csv",
+        "suffixes": "dataset/results_suffix/basic/llmbar.json"
+      },
+      "suffix_model": "llama-3",
+      "payload": "attacked rows replicate AttackPrompt._update_ids: intro + '# Output (a): ' + text1 [' + delta] + '\\n# Output (b): ' + text2 [+ ' ' + delta] + '\\nWhich is better, Output (a) or Output (b)?' with the suffix appended to the answer the attack picks",
+      "rows_per_file": {
+        "1": 100,
+        "2": 100,
+        "3": 100,
+        "4": 100,
+        "5": 100,
+        "6": 100,
+        "7": 100,
+        "8": 100,
+        "9": 100,
+        "10": 100
+      },
+      "rows": 2000,
+      "positives": 1000,
+      "negatives": 1000,
+      "built_utc": "2026-09-22T05:36:10.507175+00:00",
+      "test_csv_sha256": "f5c0fef406e021dac0c9a8dfca59d0d2d8bed26ee0e5e9d2e621802cdcde510d"
+    },
+    "formal": {
+      "source": "liu00222/Open-Prompt-Injection (USENIX Security 2024); 'Formalizing and Benchmarking Prompt Injection Attacks and Defenses'",
+      "repo": "D:\\Data\\downloads\\Open-Prompt-Injection",
+      "method": "replicates official pipeline: raw downloaders -> process_* preprocessing -> Task.__split_dataset_and_save (num=100, class-balanced) -> CombineAttacker.inject payload. label=0 = clean data-channel text; label=1 = task-integrity violation (attack payload with injected instruction)",
+      "raw_urls": {
+        "sst2": "https://dl.fbaipublicfiles.com/glue/data/SST-2.zip (dev.tsv)",
+        "sms_spam": "https://archive.ics.uci.edu/ml/machine-learning-databases/00228/smsspamcollection.zip",
+        "hsol": "https://raw.githubusercontent.com/t-davidson/hate-speech-and-offensive-language/master/data/labeled_data.csv",
+        "mrpc": "https://dl.fbaipublicfiles.com/senteval/senteval_data/msr_paraphrase_test.txt",
+        "rte": "https://dl.fbaipublicfiles.com/glue/data/RTE.zip (train.tsv)",
+        "gigaword": "SalmanFaroz/gigaword (HF mirror, streaming) split=validation; original: unilm Google-Drive org_data.zip (~550MB)",
+        "jfleg": "https://raw.githubusercontent.com/keisks/jfleg/master/dev/"
+      },
+      "tasks": {
+        "sentiment_analysis": {
+          "dataset": "sst2",
+          "split": "validation",
+          "num": 100
+        },
+        "spam_detection": {
+          "dataset": "sms_spam",
+          "split": "train",
+          "num": 100
+        },
+        "hate_detection": {
+          "dataset": "hsol",
+          "split": "train",
+          "num": 100
+        },
+        "duplicate_sentence_detection": {
+          "dataset": "mrpc",
+          "split": "test",
+          "num": 100
+        },
+        "natural_language_inference": {
+          "dataset": "rte",
+          "split": "train",
+          "num": 100
+        },
+        "summarization": {
+          "dataset": "gigaword",
+          "split": "validation",
+          "num": 100
+        },
+        "grammar_correction": {
+          "dataset": "jfleg",
+          "split": "validation",
+          "num": 100
+        }
+      },
+      "skipped": [],
+      "rows": 1400,
+      "positives": 700,
+      "negatives": 700,
+      "built_utc": "2026-09-22T05:36:38.651262+00:00",
+      "test_csv_sha256": "fb3101e3549a5c50eb9c8419da9301121c6ab5162c5e9c05220fc8d00a676cb8"
+    },
+    "benign_xstest": {
+      "source": "paul-rottger/xstest (Rottger et al., NAACL 2024, arXiv:2308.01263)",
+      "url": "https://raw.githubusercontent.com/paul-rottger/xstest/main/xstest_prompts.csv",
+      "file": "xstest_prompts.csv",
+      "download_sha256": "11783fb294ed017473ee53c207d71f2161c7672c8d0b037501e78387f801cb5a",
+      "subset": "only label=='safe' (250 prompts; 10 types x 25); unsafe contrast set excluded",
+      "prompts_by_type": {
+        "homonyms": 25,
+        "figurative_language": 25,
+        "safe_targets": 25,
+        "safe_contexts": 25,
+        "definitions": 25,
+        "nons_group_real_discr": 25,
+        "real_group_nons_discr": 25,
+        "historical_events": 25,
+        "privacy_public": 25,
+        "privacy_fictional": 25
+      },
+      "rows": 250,
+      "positives": 0,
+      "negatives": 250,
+      "built_utc": "2026-09-22T06:06:05.464389+00:00",
+      "test_csv_sha256": "f9c58dc0596910ff8919d9ddd793ad1d2fb3eaface3b63c5c8063fd4c5432566",
+      "license": "No explicit data license in the repository; cite Rottger et al. (NAACL 2024)."
+    }
+  }
+}

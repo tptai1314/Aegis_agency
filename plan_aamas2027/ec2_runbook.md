@@ -14,6 +14,7 @@ Bổ trợ cho `TODO_AAMAS2027.md`. Giả định: **không giới hạn chi ph�
 
 ## 1. Chọn instance
 
+
 | Instance | GPU | VRAM/GPU | Số GPU | Tổng VRAM | vCPU / RAM | $/giờ | FP8 W8A8? |
 |---|---|---|---|---|---|---|---|
 | **g6e.48xlarge** ✅ **CHỌN** | L40S | 44 GiB | 8 | **357 GiB** | 192 / 1536 GiB | **~$30.13** | ✅ sm_89 |

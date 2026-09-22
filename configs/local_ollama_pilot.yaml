@@ -14,7 +14,7 @@ experiment:
   measure_epsilon: true
 
 data:
-  root: D:\Data\benchmarks
+  root: data/benchmarks
   benchmark: harmbench     # swap: advbench | injecagent | formal_injection | dan | second_order | benign
   split: test
   limit: 40                # pilot cap (40 payload x 7 judges x 4 builds ~= 1120 LLM calls)

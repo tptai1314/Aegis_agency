@@ -1,0 +1,142 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage{fontspec}
+\usepackage{amsmath,amssymb}
+\usepackage{array}
+\usepackage[top=2cm,bottom=2cm,left=2.2cm,right=2.2cm]{geometry}
+\usepackage{xcolor}
+\usepackage{enumitem}
+\setmainfont{Times New Roman}
+\setlength{\parindent}{0pt}
+
+\newcommand{\todo}{$\square$}
+\newcommand{\done}{$\blacksquare$}
+\newcommand{\code}[1]{\texttt{\detokenize{#1}}}
+
+\begin{document}
+
+\begin{center}
+  {\LARGE\bfseries Checklist EC2}\\[2pt]
+  {\large Chạy real-data experiment — Aegis-Agency}\\[4pt]
+  {\small Phiên bản tiếng Việt· đi từng bước từ trái qua phải}
+\end{center}
+\vspace{4pt}
+\hrule
+\vspace{6pt}
+
+\section*{0. Trạng thái hiện tại (đã biết)}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\done] Benchmarks đã có ở máy Windows: \code{D:\textbackslash Data\textbackslash benchmarks} (8 thư mục: \emph{advbench, benign, benign\_xstest, dan, formal, harmbench, injecagent, second\_order})
+  \item[\done] Pilot local đã chạy bằng Ollama (\code{llama3.2:3b}) --- chưa đủ cho paper, không dùng làm kết quả
+  \item[\todo] SSH key \code{$\sim$/.ssh/aegis.pem} --- \textbf{chưa có} (chỉ có \code{known\_hosts})
+\end{itemize}
+
+\section*{1. Chuẩn bị trước khi thuê (máy Windows)}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\todo] Tạo key pair trên AWS Console $\to$ tải \code{aegis.pem} $\to$ đặt vào \code{$\sim$/.ssh/aegis.pem}
+  \item[\todo] (Windows) Phân quyền cho key: \code{icacls "aegis.pem" /inheritance:r /grant:r "$env:USERNAME:R"}
+  \item[\todo] Chuẩn bị \code{HF\_TOKEN} (Hugging Face read token) nếu dùng \code{meta-llama/Llama-3.1-8B-Instruct} (repo gated)
+\end{itemize}
+
+\section*{2. Thuê instance EC2}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\todo] Instance: \textbf{\code{g5.xlarge}} (1$\times$A10G 24~GB VRAM, 4~vCPU, 16~GB RAM) --- đủ cho full run Table~5/6
+  \begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+    \item Tiết kiệm: \code{g4dn.xlarge} (T4 16~GB VRAM) --- vừa đủ 1 model 8B, ít dư địa
+    \item Muốn RQ4 đa backbone ngay: \code{g5.12xlarge} (4$\times$A10G 96~GB VRAM)
+  \end{itemize}
+  \item[\todo] AMI: Ubuntu 22.04/24.04 (driver NVIDIA + CUDA 12.x sẵn)
+  \item[\todo] Disk: root $\ge$ \textbf{50~GB} (weights + vLLM cache + benchmarks)
+  \item[\todo] Security group: mở \textbf{SSH inbound (TCP 22)} từ IP của bạn. Các port vLLM (8001+) chỉ bound localhost nên không cần mở public
+\end{itemize}
+
+\section*{3. Provision server (một lần)}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\todo] SSH vào: \code{ssh -i $\sim$/.ssh/aegis.pem ubuntu@\textless ec2-host\textgreater}
+  \item[\todo] Clone repo: \code{git clone <repo-url>} rồi \code{cd AegisAgency}
+  \item[\todo] Chạy: \code{bash scripts/ec2/setup.sh} (cài python3.11, \code{.venv}, \code{pip install -e ".[ec2]"}, tạo \code{/data/benchmarks}, chạy sanity test $\sim$67 tests)
+\end{itemize}
+
+\section*{4. Upload benchmarks (một lần, từ máy Windows)}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\todo] Chạy từ thư mục repo:
+  \begin{verbatim}
+powershell -ExecutionPolicy Bypass -File scripts/ec2/upload_data.ps1 `
+    -HostTarget ubuntu@<ec2-host> -Key "$env:USERPROFILE\.ssh\aegis.pem"
+  \end{verbatim}
+  \item[\todo] Verify trên server: 8 thư mục nằm tại \code{/data/benchmarks/}
+\end{itemize}
+
+\section*{5. Serve judge backbone}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\todo] Chạy trên server, repo root:
+  \begin{verbatim}
+HF_TOKEN=<read-token> bash scripts/ec2/serve_vllm.sh   # Llama-3.1-8B @ :8001
+  \end{verbatim}
+  \item[\todo] Kiểm tra health: \code{curl http://127.0.0.1:8001/health}
+  \item[\todo] Lần đầu sẽ tải thêm embedding model \code{all-MiniLM-L6-v2} ($\sim$90~MB) --- cần internet
+  \item[\todo] (RQ4) Serve thêm backbone khác mỗi cái một port (xem mục 8)
+\end{itemize}
+
+\section*{6. Validate end-to-end giá rẻ (bắt buộc trước full run)}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\todo] \code{bash scripts/ec2/run\_real.sh smoke} --- dummy judge, 40 payloads, chỉ kiểm tra plumbing (KHÔNG dùng số liệu này)
+  \item[\todo] Sửa \code{configs/ec2\_real\_evaluation.yaml}: \code{limit: 200}, \code{n\_seeds: 1}, \code{measure\_epsilon: false}
+  \item[\todo] \code{bash scripts/ec2/run\_real.sh full} --- chạy thử rẻ hơn để xác nhận pipe, cache, outputs
+  \item[\todo] Kiểm tra outputs xuất hiện: \code{outputs/real/real\_evaluation\_summary.csv}, provenance \code{.json}
+\end{itemize}
+
+\section*{7. Full run (Table 5/6)}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\todo] Sửa lại config: \code{limit: 0} (toàn bộ payload), \code{n\_seeds: 3}, \code{measure\_epsilon: true}, \code{calibrate: true}
+  \begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+    \item Đảm bảo cache verdict rỗng với run sẽ báo cáo (đo cost/thời gian trên cold cache)
+  \end{itemize}
+  \item[\todo] \code{bash scripts/ec2/run\_real.sh full} (ước tính $\sim$8400 judge calls $\approx$ 4--5\,h serial trên GPU mid)
+  \item[\todo] \code{bash scripts/ec2/run\_real.sh ablate} --- Table 6 (reuse honest cache, thêm ít chi phí)
+  \item[\todo] Chạy thêm benchmark nếu cần: \code{advbench}, \code{injecagent}, \code{dan}, \code{formal}, \code{second\_order} (đổi \code{data.benchmark}, dùng chung cache)
+\end{itemize}
+
+\section*{8. RQ4 --- diverse committee (sau khi có Table 5/6)}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\todo] Chọn cách: (a) nâng lên \code{g5.12xlarge} hoặc (b) dùng model nhỏ hơn trên cùng GPU
+  \item[\todo] Serve mỗi backbone một port (lưu ý: \code{serve\_vllm.sh} tự thoát nếu đã có vLLM đang chạy $\to$ start tay hoặc sửa script)
+  \item[\todo] Map trong config:
+  \begin{verbatim}
+judges:
+  backbones: [llama-3, qwen2.5, mistral]
+  models:
+    llama-3: meta-llama/Llama-3.1-8B-Instruct
+    qwen2.5: Qwen/Qwen2.5-7B-Instruct
+    mistral: mistralai/Mistral-7B-Instruct-v0.3
+  endpoints:
+    llama-3: http://127.0.0.1:8001/v1
+    qwen2.5: http://127.0.0.1:8002/v1
+    mistral: http://127.0.0.1:8003/v1
+  \end{verbatim}
+  \item[\todo] Chạy lại \code{run\_real.sh full} (cache cũ của backbone khác vẫn tái dùng được)
+  \item[\todo] So sánh $\rho$ (đo bằng \code{estimators.py}) và ASR-UC giữa homogeneous vs diverse
+\end{itemize}
+
+\section*{9. Ghi nhận kết quả (paper honesty --- bắt buộc)}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\todo] Giữ nguyên mọi \code{*provenance.json} cùng các CSV output
+  \item[\todo] Cập nhật \code{audits/result\_integrity\_audit.md}: run nào thật, nguồn data, lệnh + hash
+  \item[\todo] Chỉ set \code{is\_paper\_result: true} SAU khi áp checklist verify và chạy lại độc lập (\code{docs/reproducibility.md})
+  \item[\todo] Điền các ô \code{--} trong Table 5/6 và thay figure placeholder (\code{pgfplots\_placeholder\_results.tex})
+\end{itemize}
+
+\section*{10. Dọn dẹp (tránh phí)}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item[\todo] Lưu outputs + provenance xuống máy Windows (scp/git)
+  \item[\todo] \textbf{Stop} instance khi không dùng (vẫn tính phí disk nhỏ), hoặc \textbf{Terminate} nếu xong hẳn
+  \item[\todo] Thu hồi key pair / xóa security group không dùng
+\end{itemize}
+
+\section*{11. Ước tính chi phí tham khảo}
+\begin{itemize}[leftmargin=2.2em, itemsep=1pt]
+  \item \code{g5.xlarge} $\approx$ \$1.0/h; \code{g5.12xlarge} $\approx$ \$4.5/h (giá có thể thay đổi theo region --- kiểm tra trên AWS Pricing)
+  \item Full run: $\sim$4--5\,h trên g5.xlarge $\to$ budget $\sim$5--10 USD cho 1 benchmark
+  \item Spot instance có thể giảm $\sim$60--90\% phí (rủi ro bị interrupt --- dùng cho validate, không dùng cho run cuối)
+\end{itemize}
+
+\end{document}

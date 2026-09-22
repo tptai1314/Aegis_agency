@@ -223,13 +223,16 @@ Repo **không bao giờ tự tải dữ liệu**. Cần tạo CSV theo schema `i
 >
 > Đã kiểm tra: header đúng schema, `id` duy nhất, `label ∈ {0,1}`, không ô rỗng, và **benign rời rạc hoàn toàn** với cả 4 tập tấn công (1 dòng trùng đã tự động loại).
 >
-> ⚠️ **Còn lại:** (a) chạy lại verify bằng `CsvBenchmarkAdapter` thật sau khi có venv (T1.6); (b) **`benign` hiện là prompt Discord thường, chưa phải tập over-refusal chuẩn** — nên bổ sung **XSTest** (Röttger et al. 2023) cho chỉ số ORR; (c) dữ liệu JudgeDeceiver/second-order sẽ lấy từ repo `ShiJiawenwen/JudgeDeceiver` (phải tải riêng, cần FastChat).
+> ⚠️ **Còn lại:** (a) chạy lại verify bằng `CsvBenchmarkAdapter` thật sau khi có venv (T1.6); (b) ✅ **đã bổ sung** chuẩn over-refusal **XSTest** (T1.9) → `benign_xstest/` 250 safe prompts, dùng cho chỉ số ORR; `benign` Discord giữ làm set phụ; (c) ✅ **đã lấy** dữ liệu JudgeDeceiver/second-order từ repo `ShiJiawenwen/JudgeDeceiver` (chỉ cần file có sẵn trong repo, **không cần FastChat/GPU**) và formal-injection từ `liu00222/Open-Prompt-Injection` (T1.3b/T1.5).
 
 - [x] **T1.1 — HarmBench** → `data/benchmarks/harmbench/test.csv` ✅ 320 dòng.
 - [x] **T1.2 — AdvBench + DAN in-the-wild** → `advbench/`, `dan/` ✅ 1.925 dòng. *(PAIR/TAP/GPTFuzzer chưa lấy — không bắt buộc cho bản 8 trang; nếu lấy thêm thì `group` giữ tên tấn công.)*
-- [x] **T1.3 — Prompt injection / task-integrity**: InjecAgent → `injecagent/` ✅ 510 dòng (dùng trường `Tool Response` đã chèn chỉ thị của kẻ tấn công). *(Formal injection benchmark chưa lấy.)*
-- [x] **T1.4 — Benign held-out** → `benign/test.csv` ✅ 299 dòng, `label=0`. ⚠️ xem lưu ý XSTest ở trên.
-- [ ] **T1.5 — Second-order injection payloads:** tải repo `ShiJiawenwen/JudgeDeceiver` (⚠️ **repo không có file LICENSE** — cần làm rõ trước khi phát hành bản phái sinh), lấy `dataset/results_suffix/` → `second_order/test.csv`.
+- [x] **T1.3 — Prompt injection / task-integrity**: InjecAgent → `injecagent/` ✅ 510 dòng (dùng trường `Tool Response` đã chèn chỉ thị của kẻ tấn công). *(Formal injection benchmark đã lấy ở T1.3b.)*
+- [x] **T1.3b — Formal injection benchmark** → `formal/test.csv` ✅ 1400 dòng (700 clean / 700 attack, 7 task) dựng bằng `scripts/data/build_formal.py` từ repo `liu00222/Open-Prompt-Injection` (USENIX'24): tái hiện `process_*` + `Task.__split_dataset_and_save` + `CombineAttacker.inject`; record `tasks`/`raw_urls`/`sha256` trong `PROVENANCE.json`.
+- [x] **T1.4 — Benign held-out** → `benign/test.csv` ✅ 299 dòng, `label=0`.
+- [x] **T1.9 — ORR chuẩn (XSTest)** → `benign_xstest/test.csv` ✅ 250 dòng (10 type × 25), `label=0`, dựng bằng `scripts/data/build_xstest.py` từ `paul-rottger/xstest` (NAACL'24); verify rời rạc 0 trùng với cả 6 tập attack; đã merge `benign_xstest` vào `BENCHMARK_DIRS` (`data/adapters.py`).
+- [x] **T1.5 — Second-order injection payloads:** tải repo `ShiJiawenwen/JudgeDeceiver` (⚠️ **repo không có file LICENSE** — cần làm rõ trước khi phát hành bản phái sinh), `dataset/results_suffix/basic/llmbar.json` → `second_order/test.csv` ✅ 2000 dòng (1000 clean / 1000 attack, LLMBar, suffix key `llama-3`) dựng bằng `scripts/data/build_second_order.py` (tái hiện prompt-assembly `AttackPrompt._update_ids`; không cần GPU/FastChat).
+- [ ] **T1.5b — Universal injection (liu2024universal) — BẮT BUỘC dùng S gốc:** sinh `S` bằng `scripts/ec2/run_universal_suffix.sh` trên GPU (server EC2 T2.6; local RTX 3050 4GB không đủ) → `scp results/*.json` về → rebuild → `D:\Data\benchmarks\universal_injection\test.csv` + ghi `gradient_optimized_suffix: true` trong provenance. Tạm thời **thư mục chưa có** (7 thư mục hiện tại là chuẩn để chạy). Cần HF access `meta-llama/Llama-2-7b-chat-hf` (gated).
 - [x] **T1.6 — Script chuyển đổi**: `scripts/data/build_benchmarks.py` ✅ đã chạy. Còn lại: verify lại qua `CsvBenchmarkAdapter` sau khi dựng venv.
 - [x] **T1.7 — Provenance dữ liệu** → `data/benchmarks/PROVENANCE.json` ✅ (URL nguồn, SHA-256 file thô, số dòng, phân bố group, ghi chú giấy phép).
 - [x] **T1.8 — Rời rạc (disjointness)** ✅ đã kiểm tra và **cưỡng chế tự động** trong script (`_enforce_disjoint_benign`).

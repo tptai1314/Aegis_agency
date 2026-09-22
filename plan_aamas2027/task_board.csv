@@ -1,4 +1,4 @@
-id,phase,task,owner,start,due,effort_h,depends_on,blocking,muc_do,status
+﻿id,phase,task,owner,start,due,effort_h,depends_on,blocking,muc_do,status
 T0.8,P0,"XIN AWS GPU QUOTA >=256 vCPU bucket G/VT us-east-1 (mac dinh = 0)",,2026-09-21,2026-09-21,1,,yes,"Ho so da gui; xac nhan quota duoc tang (co the mat toi 72h)",todo
 T0.9,P0,"XIN HF ACCESS 5 repo gated: Llama-3.1-8B / Llama-3.3-70B / Meta-Llama-3.1-8B / Gemma-2-9B / Meta-SecAlign-8B",,2026-09-21,2026-09-21,1,,yes,"Ca 5 repo truy cap duoc bang HF_TOKEN tren dung tai khoan",todo
 T0.1,P0,Lien he ban PC AAMAS ve han dang ky OpenReview da qua (17/09),,2026-09-21,2026-09-21,0.5,,yes,"Email da gui + tra loi duoc ghi vao decision_log.md",todo
@@ -25,8 +25,9 @@ T1.4,P1,Benign held-out (299 mau) roi rac voi tap tan cong,,2026-09-21,2026-09-2
 T1.6,P1,Script chuyen doi + verify schema (build_benchmarks.py),,2026-09-21,2026-09-21,3,T1.1;T1.2;T1.3;T1.4,yes,Script chay lai duoc; in n_payloads va n_pos,done
 T1.7,P1,Ghi lai giay phep/nguon/SHA-256/ngay tai tung dataset,,2026-09-21,2026-09-21,1,T1.6,no,data/benchmarks/PROVENANCE.json day du,done
 T1.8,P1,Kiem tra + cuong che tinh roi rac (disjointness),,2026-09-21,2026-09-21,1,T1.4,yes,Benign da duoc loc tu dong; bao cao overlap = 0,done
-T1.5,P1,Tai JudgeDeceiver (ShiJiawenwen/JudgeDeceiver) -> second_order/test.csv,,2026-09-23,2026-09-25,4,T1.6,no,second_order/test.csv phuc vu do epsilon; da lam ro van de LICENSE,todo
-T1.9,P1,Bo sung XSTest cho chi so over-refusal (ORR),,2026-09-24,2026-09-26,3,T1.4,T3.2,benign duoc bo sung bang tap over-refusal chuan,todo
+T1.5,P1,Tai JudgeDeceiver (ShiJiawenwen/JudgeDeceiver) -> second_order/test.csv,,2026-09-23,2026-09-25,4,T1.6,no,second_order/test.csv phuc vu do epsilon; da lam ro van de LICENSE,done
+T1.5b,P1,REBUILD universal_injection bang S THAT tren GPU (liu2024universal): chay run_universal_suffix.sh (Llama-2-7b-chat gated) tren EC2 -> scp results -> rebuild CSV voi gradient_optimized_suffix:true,,2026-09-25,2026-09-30,8,T2.6,no,chua co GPU (local RTX3050 4GB khong du); benchmark tam thoi chua co trong 7 thu muc,todo
+T1.9,P1,Bo sung XSTest cho chi so over-refusal (ORR),,2026-09-24,2026-09-26,3,T1.4,T3.2,benign duoc bo sung bang XSTest 250 safe prompts (done 2026-09-22 via scripts/data/build_xstest.py),done
 T2.1,P2,Dung venv Python 3.11/3.12 + pip install -e .[dev] + pytest,,2026-09-22,2026-09-22,2,,yes,Toan bo test pass; ruff check sach,todo
 T2.2,P2,Chay synthetic demo de xac nhan co che,,2026-09-22,2026-09-22,1,T2.1,no,outputs/synthetic_demo sinh ra (KHONG phai ket qua bai bao),todo
 T2.3,P2,Sua code: retry/backoff + do ty le refusal/unparseable + truc hardening,,2026-09-22,2026-09-24,10,T2.1,T3.2,Chay duoc 3 cau hinh Bang 6; ty le parse loi duoc bao cao,todo

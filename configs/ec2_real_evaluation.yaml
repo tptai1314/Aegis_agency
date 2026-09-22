@@ -16,7 +16,7 @@ experiment:
   measure_epsilon: true   # estimate Def 1 epsilon by replaying an injected payload (RQ2) - costly
 
 data:
-  root: /data/benchmarks           # mount containing the benchmark directories
+  root: data/benchmarks            # ships with the repo; also fine as /data/benchmarks mount
   benchmark: harmbench             # harmbench | advbench | injecagent | formal_injection | dan | second_order | benign
   split: test
   limit: 0                         # 0 = all payloads; use e.g. 200 to smoke-test first

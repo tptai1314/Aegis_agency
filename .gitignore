@@ -22,9 +22,8 @@ outputs/**
 # OS
 .DS_Store
 
-# Real data mounts must NEVER be committed (place on EC2 only).
-# Anchored to the repo root so the src/aegis_agency/data/ package is still tracked.
-/data/
+# Benchmark CSVs ship with the repo (data/benchmarks/ is now tracked so the
+# dataset rides along to the server). Only skip binary weight/model files.
 *.ckpt
 *.safetensors
 *.bin

@@ -33,6 +33,13 @@ BENCHMARK_DIRS: dict[str, str] = {
     "dan": "dan",
     "second_order": "second_order",
     "benign": "benign",
+    # XSTest (Rottger et al., NAACL 2024): 250 safe prompts for over-refusal (ORR) rate.
+    "benign_xstest": "benign_xstest",
+    # Optional extra families (drop a prepared CSV at these dirs to use them; no data shipped):
+    "pair": "pair",
+    "tap": "tap",
+    "gptfuzzer": "gptfuzzer",
+    "universal_injection": "universal_injection",
 }
 
 

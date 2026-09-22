@@ -43,8 +43,8 @@ This packs `D:\Data\benchmarks` into one tar, `scp`s it, and extracts to `/data/
 on the server. Expected tree (matches `data.root` + `resolve_benchmark_dir`):
 
 ```
-/data/benchmarks/harmbench/test.csv      advbench/  dan/  formal/  injecagent/
-/data/benchmarks/benign/test.csv         second_order/
+/data/benchmarks/harmbench/test.csv      advbench/  dan/  formal/  injecagent/  second_order/
+/data/benchmarks/benign/test.csv         universal_injection/
 ```
 
 Verify the adapter can read them (on the server, repo root, `.venv` active):
@@ -53,7 +53,7 @@ Verify the adapter can read them (on the server, repo root, `.venv` active):
 python - <<'PY'
 from pathlib import Path
 from aegis_agency.data.adapters import CsvBenchmarkAdapter, resolve_benchmark_dir
-for name in ("harmbench", "benign", "injecagent", "dan", "formal", "advbench", "second_order"):
+for name in ("harmbench", "benign", "injecagent", "dan", "formal", "advbench", "second_order", "universal_injection"):
     ps = list(CsvBenchmarkAdapter(root=Path("/data/benchmarks") / resolve_benchmark_dir(name)).iter_payloads())
     print(f"{name:14s} n={len(ps):6d} pos={sum(1 for p in ps if p.true_label==1):6d}")
 PY
