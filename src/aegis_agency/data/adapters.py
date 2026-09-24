@@ -123,6 +123,7 @@ class LLMJudgeAdapter(abc.ABC):
         self.endpoint_or_path = endpoint_or_path
         self.isolation = isolation
         self._ledger: Any = None
+        self._truncation: Any = None
 
     @abc.abstractmethod
     def judge(self, payload: Payload, judge_id: int, rng: np.random.Generator) -> Verdict:
@@ -131,6 +132,10 @@ class LLMJudgeAdapter(abc.ABC):
     def set_ledger(self, ledger: Any) -> None:
         """Attach a UsageLedger so ``judge()`` records cost/latency (RQ5). Optional."""
         self._ledger = ledger
+
+    def set_truncation_counter(self, counter: Any) -> None:
+        """Attach a truncation counter so context-window shortening is recorded. Optional."""
+        self._truncation = counter
 
     def _record_cost(
         self,

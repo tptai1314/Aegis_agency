@@ -55,6 +55,7 @@ def calibrate_threshold(
     objective: str = "target_orr",
     target: float = 0.05,
     min_samples: int = 20,
+    on_insufficient: str = "raise",
 ) -> CalibrationResult:
     """Select a block threshold tau on a labelled calibration set.
 
@@ -72,13 +73,24 @@ def calibrate_threshold(
     target : float in [0, 1]
         Target rate for the chosen objective.
     min_samples : int
-        Minimum items in the relevant class; below this the calibration is unreliable and a
-        conservative default is returned with a warning (safe behaviour on small samples).
+        Minimum items in the class the objective conditions on. Below this the calibration is
+        not identified.
+    on_insufficient : {"raise", "conservative"}
+        What to do when the conditioning class is under-sampled. ``"raise"`` (default) fails
+        loudly: silently falling back is how a real run ends up reporting numbers measured at
+        a threshold nobody chose. ``"conservative"`` keeps the legacy behaviour (tau = 1.0 for
+        ``target_orr``, i.e. block nothing; tau = 0.0 for ``target_fcr``) and logs a warning.
+
+        Note that tau = 1.0 is "conservative" only for *availability*: on a defense whose
+        headline metric is ASR-under-compromise it maximises evasion, so it must be an
+        explicit, individually-justified choice rather than a silent default.
 
     Returns
     -------
     CalibrationResult
     """
+    if on_insufficient not in {"raise", "conservative"}:
+        raise ValueError(f"on_insufficient must be 'raise' or 'conservative'; got {on_insufficient!r}.")
     s = check_scores(scores, "scores")
     y = np.asarray(labels, dtype=int).ravel()
     check_unit_interval(target, "target")
@@ -88,13 +100,16 @@ def calibrate_threshold(
     if objective == "target_orr":
         benign = s[y == 0]
         if benign.size < min_samples:
-            logger.warning(
-                "Only %d benign calibration items (< %d); returning conservative tau=1.0 "
-                "(block nothing spuriously). Provide more calibration data on EC2.",
-                benign.size,
-                min_samples,
+            return _insufficient(
+                on_insufficient, objective, target, benign.size, min_samples,
+                fallback=1.0, klass="benign (label 0)",
+                hint=(
+                    "target_orr needs benign calibration payloads. Increase data.limit, use a "
+                    "benchmark with a benign slice (e.g. formal, second_order, benign, "
+                    "benign_xstest), lower calibration_min_samples deliberately, or set "
+                    "calibrate: false to keep the fixed threshold."
+                ),
             )
-            return CalibrationResult(1.0, objective, target, float("nan"), benign.size)
         # Smallest tau s.t. P(score >= tau | benign) <= target  ->  tau = quantile.
         tau = float(np.quantile(benign, 1.0 - target, method="higher"))
         achieved = float(np.mean(benign >= tau))
@@ -103,19 +118,42 @@ def calibrate_threshold(
     if objective == "target_fcr":
         unsafe = s[y == 1]
         if unsafe.size < min_samples:
-            logger.warning(
-                "Only %d unsafe calibration items (< %d); returning conservative tau=0.0 "
-                "(block everything). Provide more calibration data on EC2.",
-                unsafe.size,
-                min_samples,
+            return _insufficient(
+                on_insufficient, objective, target, unsafe.size, min_samples,
+                fallback=0.0, klass="unsafe (label 1)",
+                hint=(
+                    "target_fcr needs must-block calibration payloads. Increase data.limit or "
+                    "use a benchmark that carries unsafe items."
+                ),
             )
-            return CalibrationResult(0.0, objective, target, float("nan"), unsafe.size)
         # Largest tau s.t. P(score < tau | unsafe) <= target  ->  tau = lower quantile.
         tau = float(np.quantile(unsafe, target, method="lower"))
         achieved = float(np.mean(unsafe < tau))
         return CalibrationResult(_clip01(tau), objective, target, achieved, unsafe.size)
 
     raise ValueError(f"Unknown objective: {objective!r}.")
+
+
+def _insufficient(
+    on_insufficient: str,
+    objective: str,
+    target: float,
+    n_class: int,
+    min_samples: int,
+    *,
+    fallback: float,
+    klass: str,
+    hint: str,
+) -> CalibrationResult:
+    """Handle an under-sampled calibration class (raise by default; see calibrate_threshold)."""
+    message = (
+        f"Cannot calibrate threshold for objective={objective!r}: only {n_class} {klass} "
+        f"calibration item(s) available, need >= {min_samples}. {hint}"
+    )
+    if on_insufficient == "raise":
+        raise ValueError(message)
+    logger.warning("%s Falling back to the conservative tau=%s.", message, fallback)
+    return CalibrationResult(fallback, objective, target, float("nan"), n_class)
 
 
 def _clip01(x: float) -> float:

@@ -11,16 +11,31 @@ import pytest
 
 from aegis_agency.data.adapters import CsvBenchmarkAdapter, resolve_benchmark_dir
 from aegis_agency.data.real_judges import (
+    JUDGE_PROMPT_VERSION,
+    EmbeddingExtractor,
     JudgePromptBuilder,
+    TruncationCounter,
     UsageLedger,
     VerdictCache,
     VerdictParseError,
+    _judge_verdict_or_block,
     build_real_judges,
     parse_verdict_json,
+    truncate_payload,
 )
-from aegis_agency.data.schemas import Decision, Payload, Verdict
+from aegis_agency.data.schemas import (
+    Decision,
+    DecisionResult,
+    GateMode,
+    Payload,
+    Verdict,
+    stack_verdicts,
+)
 from aegis_agency.experiments.run_real import (
     RealRunConfig,
+    _effective_cache_dir,
+    _run_seed,
+    parse_real_config,
     run_real_ablation,
     run_real_evaluation,
 )
@@ -155,6 +170,9 @@ class TestRealRunner:
             attack="collusion",
             f=1,
             calibrate=True,
+            # 24 payloads -> 6 calibration items -> 3 benign, below the 20-item minimum, so the
+            # legacy fallback is requested explicitly (the real default is to fail loudly).
+            calibration_on_insufficient="conservative",
             n_seeds=3,
             data_root=str(data_root),
             benchmark="harmbench",
@@ -390,6 +408,7 @@ class TestRealCost:
             rules=("gmed",),
             attack="collusion",
             f=1,
+            calibrate=False,
             data_root=str(data_root),
             benchmark="harmbench",
             backend="dummy",
@@ -478,3 +497,351 @@ class TestTheoryEstimators:
         # NaN pairs (metric undefined for some payloads) are dropped, array stays paired.
         rn = paired_bootstrap_mean_diff([float("nan"), 0.0, 0.0], [1.0, 1.0, 0.0], rng=rng)
         assert rn["n_pairs"] == 2 and rn["mean_diff"] == 0.5
+
+
+# ---------------------------------------------------------------------------------------
+# Regression guards for the pre-server audit (blockers A-G). Each test states the failure
+# mode it locks down; see NOTES_AUDIT_FIXES.md for the audit that produced them.
+# ---------------------------------------------------------------------------------------
+class TestEmbeddingDimensionGuard:
+    """A: a terse/refusing judge must not emit a 0-dim verdict vector.
+
+    Aggregation stacks verdict vectors into one (n, d) matrix and rejects mixed dimensions, so
+    before this guard a single judge that omitted its rationale aborted the entire run.
+    """
+
+    @staticmethod
+    def _stub_extractor(monkeypatch, dim=8):
+        extractor = EmbeddingExtractor("stub-encoder")
+        monkeypatch.setattr(extractor, "_ensure", lambda: setattr(extractor, "dim", dim))
+        return extractor
+
+    def test_empty_rationale_keeps_verdict_dimension(self, monkeypatch):
+        extractor = self._stub_extractor(monkeypatch)
+        assert extractor.embed("").shape == (8,)
+        assert extractor.embed("   ").shape == (8,)
+
+    def test_disabled_embeddings_stay_zero_dim(self):
+        assert EmbeddingExtractor("").embed("anything").shape == (0,)
+
+    def test_refusal_verdict_stacks_with_embedded_peers(self, monkeypatch):
+        extractor = self._stub_extractor(monkeypatch)
+        refusal = _judge_verdict_or_block("I can't help with that.", 3, extractor)
+        assert refusal.decision == 1 and refusal.embedding.shape == (8,)
+        peers = [Verdict(decision=1, score=0.9, embedding=np.ones(8), judge_id=k) for k in range(6)]
+        assert stack_verdicts([*peers, refusal]).shape == (7, 9)
+
+    def test_json_without_rationale_keeps_dimension(self, monkeypatch):
+        extractor = self._stub_extractor(monkeypatch)
+        verdict = _judge_verdict_or_block('{"decision": 1, "score": 0.8}', 4, extractor)
+        assert verdict.embedding.shape == (8,)
+
+
+class TestConfigParsingGuards:
+    """B: ``judges.embedding_model: ""`` must survive parsing (it disables embeddings)."""
+
+    def test_empty_embedding_model_survives_parsing(self):
+        cfg = parse_real_config({"judges": {"embedding_model": ""}})
+        assert cfg.embedding_model == ""
+
+    def test_empty_injected_suffix_survives_parsing(self):
+        cfg = parse_real_config({"experiment": {"injected_suffix": ""}})
+        assert cfg.injected_suffix == ""
+
+    def test_non_empty_strings_still_fall_back_to_defaults(self):
+        cfg = parse_real_config({"judges": {"model": "", "endpoint": ""}, "data": {"root": ""}})
+        assert cfg.model == RealRunConfig.model
+        assert cfg.endpoint == RealRunConfig.endpoint
+        assert cfg.data_root == RealRunConfig.data_root
+
+    def test_credential_env_name_is_wired_but_not_recorded(self, tmp_path):
+        data_root = tmp_path / "data"
+        TestRealRunner()._make_benchmark(data_root)
+        env_name = "AEGIS_TEST_CREDENTIAL_ENV"
+        cfg = RealRunConfig(
+            n_judges=3,
+            rules=("gmed",),
+            attack="collusion",
+            f=1,
+            calibrate=False,
+            data_root=str(data_root),
+            benchmark="harmbench",
+            backend="dummy",
+            embedding_model="",
+            cache_dir=str(tmp_path / "cache"),
+            limit=24,
+            api_key_env=env_name,
+        )
+        assert parse_real_config({"judges": {"api_key_env": env_name}}).api_key_env == env_name
+        run_real_evaluation(cfg, tmp_path / "out")
+        record = json.loads((tmp_path / "out" / "real_evaluation_provenance.json").read_text("utf-8"))
+        assert env_name not in json.dumps(record)
+
+        def keys(node):
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    yield str(key)
+                    yield from keys(value)
+            elif isinstance(node, list):
+                for item in node:
+                    yield from keys(item)
+
+        # The credential *variable name* must not be recorded either: provenance files are
+        # committed next to results and must stay free of anything secret-adjacent.
+        assert not [k for k in keys(record) if "api_key" in k.lower() or "token" in k.lower()]
+
+
+class TestCalibrationGuard:
+    """C: calibrating target_orr on a benchmark with no benign slice must fail loudly."""
+
+    @staticmethod
+    def _all_unsafe_benchmark(root, n=40):
+        rows = [{"id": f"p{i}", "content": f"candidate {i}", "label": 1, "group": "g"} for i in range(n)]
+        write_csv(root / "harmbench" / "test.csv", rows)
+
+    def _cfg(self, tmp_path, **overrides):
+        data_root = tmp_path / "data"
+        self._all_unsafe_benchmark(data_root)
+        base = dict(
+            n_judges=3,
+            rules=("gmed",),
+            attack="collusion",
+            f=1,
+            calibrate=True,
+            data_root=str(data_root),
+            benchmark="harmbench",
+            backend="dummy",
+            embedding_model="",
+            cache_dir=str(tmp_path / "cache"),
+            limit=40,
+        )
+        base.update(overrides)
+        return RealRunConfig(**base)
+
+    def test_all_unsafe_benchmark_raises_with_actionable_message(self, tmp_path):
+        with pytest.raises(ValueError, match="Cannot calibrate threshold"):
+            run_real_evaluation(self._cfg(tmp_path), tmp_path / "out")
+
+    def test_conservative_fallback_is_opt_in(self, tmp_path):
+        cfg = self._cfg(tmp_path, calibration_on_insufficient="conservative")
+        out = run_real_evaluation(cfg, tmp_path / "out")
+        assert out["rows"]
+        assert all(
+            row["threshold"] == 1.0 for row in out["rows"] if str(row["method"]).startswith("aegis")
+        )
+        assert out["provenance"]["config"]["calibration_on_insufficient"] == "conservative"
+
+
+class TestAttackEffectDiagnostic:
+    """D: a defence comparison is only informative if the attack moves decisions."""
+
+    class _MeanPipeline:
+        name = "stub_mean"
+
+        def __init__(self, threshold=0.5):
+            self.threshold = threshold
+
+        def decide(self, verdicts, payload, rng):
+            score = float(np.mean([v.score for v in verdicts]))
+            block = score >= self.threshold
+            return DecisionResult(
+                mode=GateMode.BLOCK if block else GateMode.ALLOW,
+                decision=int(Decision.BLOCK if block else Decision.ALLOW),
+                aggregate_score=score,
+                threshold=self.threshold,
+                rule="stub_mean",
+                group=payload.group,
+                payload_id=payload.payload_id,
+            )
+
+    class _ForceAllow:
+        def apply(self, honest, payload, f, rng):
+            return [Verdict(decision=0, score=0.0, judge_id=v.judge_id) for v in honest]
+
+    def _payloads_and_committees(self):
+        payloads = [Payload(payload_id=f"p{i}", content="c", true_label=1) for i in range(4)]
+        committees = {
+            p.payload_id: [Verdict(decision=1, score=0.9, judge_id=k) for k in range(3)]
+            for p in payloads
+        }
+        return payloads, committees
+
+    def test_attack_effect_is_one_when_the_attack_forces_every_flip(self):
+        payloads, committees = self._payloads_and_committees()
+        cfg = RealRunConfig(n_judges=3, rules=("gmed",), attack="compromise")
+        out = _run_seed(
+            cfg, 0, payloads, committees, {"stub_mean": self._MeanPipeline()}, {}, self._ForceAllow(), [1]
+        )
+        assert out["rows"][0]["attack_effect"] == 1.0
+
+    def test_attack_effect_is_zero_without_an_attack(self):
+        payloads, committees = self._payloads_and_committees()
+        cfg = RealRunConfig(n_judges=3, rules=("gmed",), attack="none")
+        out = _run_seed(
+            cfg, 0, payloads, committees, {"stub_mean": self._MeanPipeline()}, {}, None, [1]
+        )
+        assert out["rows"][0]["attack_effect"] == 0.0
+
+    def test_sweep_and_summary_carry_attack_effect(self, tmp_path):
+        data_root = tmp_path / "data"
+        TestRealRunner()._make_benchmark(data_root)
+        cfg = RealRunConfig(
+            n_judges=3,
+            rules=("gmed",),
+            attack="collusion",
+            f=1,
+            calibrate=False,
+            data_root=str(data_root),
+            benchmark="harmbench",
+            backend="dummy",
+            embedding_model="",
+            cache_dir=str(tmp_path / "cache"),
+            limit=24,
+        )
+        out = run_real_evaluation(cfg, tmp_path / "out")
+        header = (tmp_path / "out" / "real_evaluation_sweep.csv").read_text(encoding="utf-8").splitlines()[0]
+        assert "attack_effect" in header
+        assert all("attack_effect" in row and "attack_effect_std" in row for row in out["summary"])
+        # Default collusion radius 0.1 cannot move a committee whose honest scores sit at 0.9.
+        assert all(row["attack_effect"] == 0.0 for row in out["rows"])
+
+
+class TestContextWindowGuard:
+    """F: over-long payloads must be handled deterministically, not abort the run."""
+
+    def test_truncation_is_off_by_default(self):
+        text = "a" * 5000
+        assert truncate_payload(text, 0) == (text, 0)
+
+    def test_short_content_is_untouched(self):
+        assert truncate_payload("hello", 200) == ("hello", 0)
+
+    def test_truncation_is_bounded_and_keeps_both_ends(self):
+        text = "HEAD" + "x" * 5000 + "TAIL"
+        out, elided = truncate_payload(text, 200)
+        assert len(out) <= 200
+        assert out.startswith("HEAD") and out.endswith("TAIL")
+        assert "elided to fit the judge context window" in out
+        assert 0 < elided < len(text)
+
+    def test_useless_budget_is_rejected(self):
+        with pytest.raises(ValueError):
+            truncate_payload("x" * 100, 10)
+
+    def test_prompt_builder_counts_truncated_payloads_once_each(self):
+        counter = TruncationCounter()
+        builder = JudgePromptBuilder(isolation=True, max_prompt_chars=200)
+        long_text = "HEAD" + "x" * 5000 + "TAIL"
+        builder.build(Payload(payload_id="p1", content=long_text), 0, truncation=counter)
+        builder.build(Payload(payload_id="p1", content=long_text), 1, truncation=counter)
+        builder.build(Payload(payload_id="p2", content="short"), 2, truncation=counter)
+        assert counter.events == 2
+        assert counter.n_payloads == 1
+        assert counter.elided_chars > 0
+
+    def test_prompts_are_byte_identical_when_nothing_is_truncated(self):
+        payload = Payload(payload_id="p", content="short content", true_label=0)
+        guarded = JudgePromptBuilder(isolation=True, max_prompt_chars=200).build(payload, 4)
+        plain = JudgePromptBuilder(isolation=True).build(payload, 4)
+        assert guarded == plain
+
+
+class TestCacheContextGuard:
+    """G: a cached verdict is only reused when the measurement context matches."""
+
+    @staticmethod
+    def _context(**overrides):
+        ctx = {
+            "prompt_version": JUDGE_PROMPT_VERSION,
+            "isolation": True,
+            "backend": "openai_compat",
+            "model": "meta-llama/Llama-3.1-8B-Instruct",
+            "embedding_model": "all-MiniLM-L6-v2",
+            "max_prompt_chars": 0,
+        }
+        ctx.update(overrides)
+        return ctx
+
+    def test_isolation_change_invalidates_cached_verdicts(self, tmp_path):
+        cache = VerdictCache(tmp_path / "c.jsonl")
+        cache.store(
+            Verdict(decision=1, score=0.9, embedding=np.ones(4), judge_id=0),
+            "p",
+            "llama-3",
+            self._context(isolation=True),
+        )
+        assert cache.lookup("p", 0, "llama-3", self._context(isolation=True)) is not None
+        assert cache.lookup("p", 0, "llama-3", self._context(isolation=False)) is None
+        assert cache.n_stale == 1
+
+    def test_prompt_version_change_invalidates_cache(self, tmp_path):
+        cache = VerdictCache(tmp_path / "c.jsonl")
+        cache.store(
+            Verdict(decision=1, score=0.9, embedding=np.ones(4), judge_id=0),
+            "p",
+            "b",
+            self._context(),
+        )
+        assert cache.lookup("p", 0, "b", self._context(prompt_version="judge-prompt-v0")) is None
+
+    def test_resolved_model_change_invalidates_cache(self, tmp_path):
+        cache = VerdictCache(tmp_path / "c.jsonl")
+        cache.store(
+            Verdict(decision=1, score=0.9, embedding=np.ones(4), judge_id=0), "p", "b", self._context()
+        )
+        assert cache.lookup("p", 0, "b", self._context(model="Qwen/Qwen2.5-7B-Instruct")) is None
+
+    def test_legacy_record_without_context_is_stale(self, tmp_path):
+        path = tmp_path / "legacy.jsonl"
+        path.write_text(
+            json.dumps(
+                {
+                    "payload_id": "p",
+                    "judge_id": 0,
+                    "backbone": "b",
+                    "decision": 1,
+                    "score": 0.5,
+                    "embedding": [0.1],
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        cache = VerdictCache(path)
+        assert cache.lookup("p", 0, "b", self._context()) is None
+
+    def test_reloaded_record_keeps_its_context_and_dimension(self, tmp_path):
+        path = tmp_path / "c.jsonl"
+        VerdictCache(path).store(
+            Verdict(decision=1, score=0.5, embedding=np.ones(4), judge_id=0), "p", "b", self._context()
+        )
+        reloaded = VerdictCache(path)
+        got = reloaded.lookup("p", 0, "b", self._context())
+        assert got is not None and got.embedding.shape == (4,)
+
+    def test_dummy_backend_gets_its_own_cache_directory(self):
+        dummy = RealRunConfig(backend="dummy", cache_dir="outputs/real_verdict_cache")
+        real = RealRunConfig(backend="openai_compat", cache_dir="outputs/real_verdict_cache")
+        assert _effective_cache_dir(dummy).name == "real_verdict_cache_dummy"
+        assert _effective_cache_dir(real).name == "real_verdict_cache"
+
+    def test_cache_files_are_tagged_by_isolation(self, tmp_path):
+        data_root = tmp_path / "data"
+        TestRealRunner()._make_benchmark(data_root)
+        cfg = RealRunConfig(
+            n_judges=3,
+            rules=("gmed",),
+            attack="collusion",
+            f=1,
+            calibrate=False,
+            data_root=str(data_root),
+            benchmark="harmbench",
+            backend="dummy",
+            embedding_model="",
+            cache_dir=str(tmp_path / "cache"),
+            limit=24,
+        )
+        run_real_evaluation(cfg, tmp_path / "out")
+        names = sorted(p.name for p in (tmp_path / "cache_dummy").glob("*.jsonl"))
+        assert "harmbench_iso_honest.jsonl" in names
+        assert "harmbench_noiso_honest.jsonl" in names

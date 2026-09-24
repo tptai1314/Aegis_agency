@@ -26,4 +26,6 @@ judges:
   endpoint: http://127.0.0.1:8001/v1
   embedding_model: ""      # skip sentence-encoder for a fast smoke (m = 0, score-only)
   isolation: true
-  cache_dir: outputs/smoke_verdict_cache   # separate from the real-run cache dir
+  # A dummy run writes to <cache_dir>_dummy automatically, so a smoke run can never pollute the
+  # cache a real run reuses. The effective path is outputs/smoke_verdict_cache_dummy.
+  cache_dir: outputs/smoke_verdict_cache

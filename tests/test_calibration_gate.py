@@ -1,6 +1,7 @@
 """Calibration and gate-decision tests (Algorithm 1; calibration module)."""
 
 import numpy as np
+import pytest
 
 from aegis_agency.data.schemas import CommitteeConfig, Decision, GateMode, Verdict
 from aegis_agency.methods.calibration import calibrate_threshold, temperature_scale
@@ -48,11 +49,26 @@ def test_calibrate_threshold_target_orr():
     assert np.mean(benign >= cal.threshold) <= 0.1
 
 
-def test_calibrate_small_sample_is_conservative():
+def test_calibrate_small_sample_raises_by_default():
+    """Under-sampling the calibration class must fail loudly, not pick a threshold silently."""
     scores = np.array([0.1, 0.9])
     labels = np.array([0, 1])
-    cal = calibrate_threshold(scores, labels, objective="target_orr", target=0.05, min_samples=20)
-    assert cal.threshold == 1.0  # conservative default when too few benign items
+    with pytest.raises(ValueError, match="only 1 benign"):
+        calibrate_threshold(scores, labels, objective="target_orr", target=0.05, min_samples=20)
+
+
+def test_calibrate_small_sample_is_conservative_when_asked():
+    scores = np.array([0.1, 0.9])
+    labels = np.array([0, 1])
+    cal = calibrate_threshold(
+        scores,
+        labels,
+        objective="target_orr",
+        target=0.05,
+        min_samples=20,
+        on_insufficient="conservative",
+    )
+    assert cal.threshold == 1.0  # opt-in legacy fallback when too few benign items
 
 
 def test_temperature_scale_identity():

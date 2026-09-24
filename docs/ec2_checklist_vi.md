@@ -17,26 +17,31 @@ Checklist thực thi, tiếng Việt. Đi từng bước từ trái qua phải, 
 ## 2. Thuê instance EC2
 
 - [ ] Instance: **`g5.xlarge`** (1×A10G 24 GB VRAM, 4 vCPU, 16 GB RAM) — đủ cho full run Table 5/6
-    - Tiết kiệm: `g4dn.2xlarge` (T4 16 GB VRAM) — vừa đủ 1 model 8B, ít dư địa
+    - `g4dn.2xlarge` (T4 **16 GB**) chỉ ở mức **chớm đủ** cho 1 model 8B: KV cache + embedding model
+      dễ OOM, và payload dài dễ vượt context → khuyến nghị **≥ 24 GB VRAM**
+    - RAM khuyến nghị **≥ 32 GB** (nhiều process vLLM + 7 sentence-encoder instance)
     - Muốn RQ4 đa backbone ngay: `g5.12xlarge` (4×A10G 96 GB VRAM)
 - [ ] AMI: Ubuntu 22.04/24.04 (driver NVIDIA + CUDA 12.x sẵn)
-- [ ] Disk: root ≥ **50 GB** (weights + vLLM cache + benchmarks)
+- [ ] Disk: root ≥ **60 GB** (weights + vLLM cache + benchmarks + verdict cache)
 - [ ] Security group: mở **SSH inbound (TCP 22)** từ IP của bạn. Các port vLLM (8001+) chỉ bound localhost nên không cần mở public
 
 ## 3. Provision server (một lần)
 
 - [ ] SSH vào: `ssh -i ~/.ssh/aegis.pem ubuntu@<ec2-host>`
-- [ ] Clone repo: `git clone <repo-url>` rồi `cd AegisAgency`
-- [ ] Chạy: `bash scripts/ec2/setup.sh` (cài python3.11, `.venv`, `pip install -e ".[ec2]"`, tạo `/data/benchmarks`, chạy sanity test ~67 tests)
+- [ ] Clone repo: `git clone <repo-url>` rồi `cd AegisAgency` (dataset **đã có sẵn trong repo**)
+- [ ] Chạy: `PYTHON=python3.12 bash scripts/ec2/setup.sh`
+      (script tự dò Python ≥ 3.11; chỉ cài `python3.12`/deadsnakes khi máy chưa có; tạo `.venv`,
+      `pip install -e ".[ec2]"`, ghi `outputs/pip-freeze-*.txt`, chạy sanity test **104 tests**)
 
-## 4. Upload benchmarks (một lần, từ máy Windows)
+## 4. Upload benchmarks — **KHÔNG cần** (dataset nằm trong repo)
 
-- [ ] Chạy từ thư mục repo:
-    ```powershell
-    powershell -ExecutionPolicy Bypass -File scripts/ec2/upload_data.ps1 `
-        -HostTarget ubuntu@<ec2-host> -Key "$env:USERPROFILE\.ssh\aegis.pem"
-    ```
-- [ ] Verify trên server: 8 thư mục nằm tại `/data/benchmarks/`
+- [ ] Bỏ qua bước này nếu dùng `data.root: data/benchmarks` (mặc định của config).
+- [ ] Chỉ khi bạn muốn dùng `/data/benchmarks`: chạy `scripts/ec2/upload_data.ps1` từ máy Windows
+      (script dùng `sudo` phía server; không có sudo thì giải nén tarball vào thư mục bạn sở hữu
+      rồi sửa `data.root`).
+- [ ] Verify adapter đọc được mọi benchmark: chạy snippet trong `docs/ec2_experiment_guide.md` §2
+      (kỳ vọng: harmbench 320/320, dan 1405/1405, formal 1400/700, second_order 2000/1000,
+      benign 299/0, benign_xstest 250/0, `universal_injection ABSENT`).
 
 ## 6. Sinh S gốc cho universal_injection (GPU, một lần)
 
@@ -73,49 +78,64 @@ CSV `universal_injection` hiện là **stand-in simulated** (target-string dán 
 
 ## 8. Validate end-to-end giá rẻ (bắt buộc trước full run)
 
-- [ ] `bash scripts/ec2/run_real.sh smoke` — dummy judge, 40 payloads, chỉ kiểm tra plumbing (KHÔNG dùng số liệu này)
+- [ ] `python scripts/check_ready.py --config configs/ec2_real_evaluation.yaml` → **0 FAIL**
+      (script báo trước: payload quá dài, calibration không khả thi, endpoint sai model, cache cũ,
+      attack quá yếu)
 - [ ] Sửa `configs/ec2_real_evaluation.yaml`: `limit: 200`, `n_seeds: 1`, `measure_epsilon: false`
-- [ ] `bash scripts/ec2/run_real.sh full` — chạy thử rẻ hơn để xác nhận pipe, cache, outputs
-- [ ] Kiểm tra outputs thực sự xuất hiện: `outputs/real/real_evaluation_summary.csv`, provenance `.json`
+- [ ] **`calibrate`**: giữ `false` cho harmbench/advbench/dan/injecagent (toàn label 1 → không có
+      benign để calibrate `target_orr`; bật lên sẽ **abort** chứ không còn âm thầm trả `tau=1.0`)
+- [ ] `AEGIS_OUT=outputs/real.smoke bash scripts/ec2/run_real.sh smoke` — dummy judge, 40 payloads,
+      chỉ kiểm tra plumbing (KHÔNG dùng số liệu này; verdict dummy được ghi vào `*_dummy` riêng)
+- [ ] `AEGIS_OUT=outputs/real_trial bash scripts/ec2/run_real.sh full` — chạy thử rẻ hơn để xác nhận
+      pipe, cache, outputs
+- [ ] Kiểm tra outputs thực sự xuất hiện: `real_evaluation_summary.csv`, `*_provenance.json`
 
 ## 9. Full run (Table 5/6)
 
-- [ ] Sửa lại config: `limit: 0` (toàn bộ payload), `n_seeds: 3`, `measure_epsilon: true`, `calibrate: true`
-    - Đảm bảo cache verdict rỗng với run sẽ báo cáo (cost/thời gian đo trên cold cache)
-- [ ] `bash scripts/ec2/run_real.sh full` (ước tính ~8400 judge calls ≈ 4–5h serial trên GPU mid)
-- [ ] `bash scripts/ec2/run_real.sh ablate` — Table 6 (reuse honest cache, thêm ít chi phí)
-- [ ] Chạy nhiều benchmark nếu cần: `advbench`, `injecagent`, `dan`, `formal`, `second_order` (đổi `data.benchmark`, dùng chung cache)
+- [ ] Sửa lại config: `limit: 0`, `n_seeds: 3`, `measure_epsilon: true`, `calibrate: false`
+      (chỉ bật `calibrate: true` khi benchmark có benign slice và slice đủ
+      `calibration_min_samples=20` benign)
+    - Đảm bảo cache verdict rỗng với run sẽ báo cáo (cost/thời gian đo trên cold cache).
+      Lưu ý: cache được key theo *measurement context* (prompt version, isolation, model,
+      embedding model, `max_prompt_chars`) — đổi bất kỳ mục nào sẽ **đo lại**, không reuse.
+- [ ] `AEGIS_OUT=outputs/real_harmbench bash scripts/ec2/run_real.sh full` (≈8400 judge calls ≈ 4–5 h)
+- [ ] **Đọc `attack_effect` trong `real_evaluation_summary.csv` trước tiên.** Nếu = 0 ở mọi rule
+      Aegis → attack không đổi quyết định nào, mọi method giống nhau, bảng vô nghĩa → tăng
+      `attack_kwargs.radius/budget` rồi chạy lại (và ghi lại trong provenance).
+- [ ] `AEGIS_OUT=outputs/real_harmbench bash scripts/ec2/run_real.sh ablate` — Table 6 (reuse cache)
+- [ ] Chạy nhiều benchmark nếu cần: `advbench`, `injecagent`, `dan`, `formal_injection`,
+      `second_order` (đổi `data.benchmark`; **mỗi benchmark một `AEGIS_OUT` riêng**, nếu không sẽ
+      ghi đè kết quả của nhau). Lưu ý key đúng là `formal_injection`, không phải `formal`;
+      `dan` có payload tới ~55k ký tự nên cần `judges.max_prompt_chars` (mặc định 16000).
 
 ## 10. RQ4 — diverse committee (sau khi có Table 5/6)
 
-- [ ] Chọn cách: (a) nâng lên `g5.12xlarge` hoặc (b) dùng model nhỏ hơn trên cùng GPU
-- [ ] Serve mỗi backbone một port (lưu ý: `serve_vllm.sh` tự thoát nếu đã có vLLM đang chạy → start tay hoặc sửa script)
-- [ ] Map trong config:
-    ```yaml
-    judges:
-      backbones: [llama-3, qwen2.5, mistral]
-      models:
-        llama-3: meta-llama/Llama-3.1-8B-Instruct
-        qwen2.5: Qwen/Qwen2.5-7B-Instruct
-        mistral: mistralai/Mistral-7B-Instruct-v0.3
-      endpoints:
-        llama-3: http://127.0.0.1:8001/v1
-        qwen2.5: http://127.0.0.1:8002/v1
-        mistral: http://127.0.0.1:8003/v1
-    ```
-- [ ] Chạy lại `run_real.sh full` (cache cũ của backbone khác vẫn được tái dùng)
-- [ ] So sánh ρ (đo bằng `estimators.py`) và ASR-UC giữa homogeneous vs diverse
+- [ ] Chọn cách: (a) server có ≥ 3 GPU, hoặc (b) dùng model nhỏ hơn/API cho các arm phụ
+- [ ] `bash scripts/ec2/serve_backbones.sh` (mặc định :8001 llama-3.1-8B, :8002 Qwen2.5-7B,
+      :8003 Mistral-7B — mỗi backbone một GPU; `serve_vllm.sh` giờ chỉ no-op theo **đúng port**)
+- [ ] Dùng `configs/ec2_rq4_diverse.yaml` (đã map sẵn `backbones`/`models`/`endpoints`) rồi
+      `python scripts/check_ready.py --config configs/ec2_rq4_diverse.yaml`
+- [ ] `AEGIS_OUT=outputs/real_rq4 bash scripts/ec2/run_real.sh full`
+- [ ] So sánh ρ (`real_theory_analysis.csv`) và ASR-UC giữa homogeneous vs diverse
+- [ ] Nếu không đủ GPU/API: báo RQ4 là **not measured**, KHÔNG suy diễn từ homogeneous arm
 
 ## 11. Ghi nhận kết quả (paper honesty — bắt buộc)
 
-- [ ] Giữ nguyên mọi `*provenance.json` cùng với các CSV output
-- [ ] Cập nhật `audits/result_integrity_audit.md`: run nào thật, nguồn data, lệnh + hash
-- [ ] Chỉ set `is_paper_result: true` SAU khi áp checklist verify và chạy lại độc lập (`docs/reproducibility.md`)
+- [ ] Giữ nguyên mọi `*provenance.json` cùng với các CSV output **và verdict cache**
+      (cache là "raw data" mà CSV được tính ra từ đó)
+- [ ] Đóng gói + tải về: `bash scripts/ec2/backup_results.sh --outputs outputs/real_harmbench`
+      rồi `scripts/backup_results.ps1` (verify sha256 khi tải)
+- [ ] `python scripts/finalize_run.py --run <run dir>` → verify + ghi
+      `audits/run_records/<run_id>.json` + cập nhật bảng trong `audits/result_integrity_audit.md`
+- [ ] Chỉ set `is_paper_result: true` SAU khi chạy lại độc lập khớp số:
+      `python scripts/finalize_run.py --run <run1> --replicated-by <run2> --set-paper-result`
+      (script tự từ chối nếu verify fail hoặc hai summary không khớp)
 - [ ] Điền các ô `--` trong Table 5/6 và thay figure placeholder (`pgfplots_placeholder_results.tex`)
 
-## 12. Dọn dẹp (tránh phí)
+## 12. Dọn dẹp
 
-- [ ] Lưu outputs + provenance xuống máy Windows (scp/git)
+- [ ] Lưu outputs + provenance + cache xuống máy Windows (mục 11)
+- [ ] Dừng backbone: `kill $(cat outputs/vllm-*.pid)`
 - [ ] **Stop instance** khi không dùng (vẫn tính phí disk nhỏ), hoặc **Terminate** nếu xong hẳn
 - [ ] Thu hồi key pair / xóa security group không dùng
 

@@ -1,0 +1,61 @@
+# RQ4 - diverse-committee config (Table 5 diverse arm; correlated-failure test).
+#
+# Requires one served backbone per endpoint. On a single 24 GB GPU use APIs instead of extra
+# local servers, or move to a multi-GPU machine:
+#
+#   bash scripts/ec2/serve_backbones.sh            # starts :8001/:8002/:8003 (one GPU each)
+#   python scripts/check_ready.py --config configs/ec2_rq4_diverse.yaml
+#
+# Compare against the homogeneous arm (configs/ec2_real_evaluation.yaml) with the SAME seed and
+# payload cap: the only difference should be `judges.models`/`judges.endpoints`.
+# Report rho and score_rho from real_theory_analysis.csv plus ASR-UC from
+# real_evaluation_summary.csv; with a homogeneous committee score_rho is near 1.
+
+experiment:
+  n_judges: 7
+  rules: [cmed, gmed, krum]
+  threshold: 0.5
+  escalate_band: 0.05
+  attack: collusion
+  attack_kwargs:
+    radius: 0.1
+    budget: 1.0
+  f: 2
+  calibrate: false          # see configs/ec2_real_evaluation.yaml for when to enable
+  target_orr: 0.05
+  calibration_min_samples: 20
+  calibration_on_insufficient: raise
+  seed: 0
+  n_seeds: 3
+  measure_theory: true      # rho / score_rho are the RQ4 readout
+  measure_epsilon: false    # already measured in the homogeneous arm; keeps this arm cheap
+
+data:
+  root: data/benchmarks
+  benchmark: harmbench
+  split: test
+  limit: 0
+
+judges:
+  backend: openai_compat
+  # 7 judges cycle through these 3 backbones -> 3/3/1. Change n_judges or add backbones for a
+  # different split; every label listed here MUST have a models: and endpoints: entry.
+  backbones: [llama-3, qwen2.5, mistral]
+  models:
+    llama-3: meta-llama/Llama-3.1-8B-Instruct
+    qwen2.5: Qwen/Qwen2.5-7B-Instruct
+    mistral: mistralai/Mistral-7B-Instruct-v0.3
+  endpoints:
+    llama-3: http://127.0.0.1:8001/v1
+    qwen2.5: http://127.0.0.1:8002/v1
+    mistral: http://127.0.0.1:8003/v1
+  # Fallbacks for any backbone not in the two maps above.
+  model: meta-llama/Llama-3.1-8B-Instruct
+  endpoint: http://127.0.0.1:8001/v1
+  api_key_env: OPENAI_API_KEY
+  embedding_model: all-MiniLM-L6-v2
+  isolation: true
+  # Separate cache: the committee fingerprint (model per judge) is part of the cache context, so
+  # a distinct directory keeps the RQ4 costs and files easy to tell apart from the homogeneous arm.
+  cache_dir: outputs/real_rq4_verdict_cache
+  max_prompt_chars: 16000

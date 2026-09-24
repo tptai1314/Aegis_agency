@@ -1,23 +1,33 @@
-# TODO — Implementation (EC2 / real experiments)
+# TODO — Implementation (GPU server / real experiments)
 
-The repository is complete and runnable on synthetic data (47 tests pass; synthetic demo
+The repository is complete and runnable on synthetic data (104 tests pass; synthetic demo
 runs). The items below are what remains to run the **paper-level** experiments; none block the
 synthetic mechanism.
 
-## Data (manual provisioning — never auto-downloaded)
-- [ ] Place jailbreak benchmarks (AdvBench/GCG, PAIR, TAP, GPTFuzzer, in-the-wild DAN,
-      HarmBench) as CSVs per `docs/data_format.md` under `data.root`.
-- [ ] Place injection benchmarks (formal injection benchmark, InjecAgent, universal injection).
-- [ ] Place held-out benign traffic for over-refusal / utility.
-- [ ] Generate second-order injections with a real JudgeDeceiver optimiser.
+> The audit-fix pass (see `NOTES_AUDIT_FIXES.md`) closed the pre-server blockers: silent
+> calibration fallback, empty-rationale verdict crashes, context-window aborts, cache reuse
+> across changed measurement conditions, and the missing preflight/backup/finalize tooling.
+
+## Data (ships in-repo; only `universal_injection` still needs GPU work)
+- [x] Jailbreak benchmarks present under `data/benchmarks/` (AdvBench/GCG, in-the-wild DAN,
+      HarmBench) with `PROVENANCE.json` recording source URL + sha256.
+- [x] Injection benchmark `formal` (Open-Prompt-Injection, 1400 rows) + `injecagent` (510).
+- [x] Held-out benign traffic: `benign` (299) and `benign_xstest` (250) for ORR / utility.
+- [x] Second-order payloads `second_order` (JudgeDeceiver LLMBar suffix, 2000 rows).
+- [ ] `universal_injection`: needs the GENUINE gradient-optimised suffix
+      (`scripts/ec2/run_universal_suffix.sh` on a GPU with Llama-2 access); the simulated
+      stand-in was deleted and must not be reported. See `docs/universal_injection_runbook.md`.
+- [ ] Optional: split `dan` into PAIR/TAP/GPTFuzzer family CSVs by heuristic (record that the
+      split is heuristic, not the official family set).
 
 ## Real models / baselines (weights, APIs, GPUs)
-- [ ] Implement `data.adapters.LLMJudgeAdapter.judge()` for real hardened judges on
-      Llama-3 / Qwen2.5 / Mistral / GPT-4o / Claude-3.5 with SecAlign/StruQ hardening +
-      payload isolation.
+- [x] Real judge adapters implemented (`data/real_judges.py`: OpenAI-compatible / Anthropic /
+      HF transformers) with payload isolation, verdict cache and cost ledger.
 - [ ] Implement `AutoDefenseAdapter.predict()` (real AutoDefense system).
-- [ ] Implement `SecAlignAdapter.predict()` and `StruQAdapter.predict()` (checkpoints).
-- [ ] Implement `JudgeDeceiverAdapter.inject()` (real second-order injection).
+- [ ] Implement `SecAlignAdapter.predict()` and `StruQAdapter.predict()` (checkpoints) — the
+      Table 6 row "- hardened judges" and the SecAlign baseline both need these.
+- [ ] Implement `JudgeDeceiverAdapter.inject()` (real second-order injection; today `epsilon` is
+      measured by replaying a fixed suffix, not by an optimiser).
 - [ ] Provide checkpoint paths / endpoints via `ExternalBaselineConfig`; read secrets from env,
       never commit them.
 

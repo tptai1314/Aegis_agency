@@ -60,6 +60,11 @@ class TrialConfig:
     unsafe_fraction: float = 0.5
     calibrate: bool = True
     target_orr: float = 0.05
+    #: Synthetic runs are mechanism smoke tests, not reported measurements, and the generator's
+    #: scores are class-separated by construction, so a small simulated calibration slice keeps
+    #: the legacy tau fallback instead of aborting. The real-data runner
+    #: (:class:`~aegis_agency.experiments.run_real.RealRunConfig`) defaults to "raise".
+    calibration_on_insufficient: str = "conservative"
     seed: int = 0
     attack_kwargs: dict = field(default_factory=dict)
 
@@ -168,7 +173,11 @@ def run_trial(cfg: TrialConfig) -> dict:
                 cal_scores.append(res.aggregate_score)
                 cal_labels.append(p.true_label)
             cal = calibrate_threshold(
-                np.array(cal_scores), np.array(cal_labels), objective="target_orr", target=cfg.target_orr
+                np.array(cal_scores),
+                np.array(cal_labels),
+                objective="target_orr",
+                target=cfg.target_orr,
+                on_insufficient=cfg.calibration_on_insufficient,
             )
             thresholds[name] = cal.threshold
             _set_threshold(pipe, cal.threshold)

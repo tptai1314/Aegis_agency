@@ -43,16 +43,19 @@ Key behaviours
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from math import nan
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
 from aegis_agency.attacks import ATTACKS, Attack
 from aegis_agency.data.adapters import CsvBenchmarkAdapter, resolve_benchmark_dir
 from aegis_agency.data.real_judges import (
+    JUDGE_PROMPT_VERSION,
+    TruncationCounter,
     UsageLedger,
     VerdictCache,
     build_real_judges,
@@ -81,6 +84,11 @@ from aegis_agency.utils.logging import get_logger
 from aegis_agency.utils.provenance import RunProvenance
 
 logger = get_logger(__name__)
+
+#: Config keys whose empty string is *meaningful* and must survive ``parse_real_config``.
+#: ``judges.embedding_model: ""`` disables rationale embeddings (m = 0); ``injected_suffix: ""``
+#: means the epsilon replay appends nothing. Every other empty string falls back to its default.
+_EMPTY_STRING_MEANINGFUL = ("embedding_model", "injected_suffix")
 
 #: Second-order instruction appended to real payloads to estimate Def 1 epsilon.
 DEFAULT_INJECTED_SUFFIX = (
@@ -112,10 +120,23 @@ class RealRunConfig:
     backbones: Sequence[str] = ("llama-3", "qwen2.5", "mistral", "gpt-4o", "claude-3.5")
     model: str = "meta-llama/Llama-3.1-8B-Instruct"
     endpoint: str = "http://127.0.0.1:8001/v1"
+    #: Env var each backend reads for its credential. "" keeps the backend's own default
+    #: (OPENAI_API_KEY for openai_compat, ANTHROPIC_API_KEY for anthropic). Never recorded in
+    #: the provenance: it is a variable *name*, and the file must stay secret-free.
+    api_key_env: str = ""
     embedding_model: str = "all-MiniLM-L6-v2"
     isolation: bool = True
     cache_dir: str = "outputs/real_verdict_cache"
+    #: 0 = send payloads unchanged. > 0 middle-truncates a payload to this many characters so
+    #: it fits the served context window (see docs/ec2_experiment_guide.md). Truncation is
+    #: counted and recorded in the provenance because it is a measurement condition.
+    max_prompt_chars: int = 0
     attack_kwargs: dict = field(default_factory=dict)
+    #: Threshold-calibration guards. Under-sampling the class an objective conditions on makes
+    #: calibration unidentified; the default is to fail loudly rather than silently fall back
+    #: to a threshold nobody chose.
+    calibration_min_samples: int = 20
+    calibration_on_insufficient: str = "raise"
     #: Per-backbone override of the shared ``model``/``endpoint`` (RQ4 diversity). Backbones
     #: not listed fall back to the global values. Empty => previous homogeneous behaviour.
     models: dict[str, str] | None = None
@@ -131,7 +152,13 @@ class RealRunConfig:
 
 
 def parse_real_config(d: dict[str, Any]) -> RealRunConfig:
-    """Build a RealRunConfig from the experiment/data/judges sections of a YAML file."""
+    """Build a RealRunConfig from the experiment/data/judges sections of a YAML file.
+
+    Keys the runner does not know are reported instead of being dropped in silence: a typo in a
+    knob (or a key that lives in the docs but was never wired to code) would otherwise change
+    nothing while looking like it did. Empty strings mean "use the default" — except for the
+    keys in :data:`_EMPTY_STRING_MEANINGFUL`, where ``""`` is itself a valid setting.
+    """
     exp = d.get("experiment", {})
     data = d.get("data", {})
     judges = d.get("judges", {})
@@ -141,16 +168,30 @@ def parse_real_config(d: dict[str, Any]) -> RealRunConfig:
     allowed = set(RealRunConfig.__dataclass_fields__)
     key_map = {"root": "data_root"}
     overrides: dict[str, Any] = {}
-    for section in (exp, data, judges):
+    unknown: list[str] = []
+    for section_name, section in (("experiment", exp), ("data", data), ("judges", judges)):
         for key, value in section.items():
             mapped = key_map.get(key, key)
             if mapped in allowed:
                 overrides[mapped] = value
+            else:
+                unknown.append(f"{section_name}.{key}")
+    if unknown:
+        logger.warning(
+            "Config key(s) with no effect in this runner (ignored): %s. Recognised keys: %s.",
+            ", ".join(sorted(unknown)),
+            ", ".join(sorted(allowed | set(key_map))),
+        )
     if "backbones" in overrides:
         overrides["backbones"] = tuple(overrides["backbones"])
     if "rules" in overrides:
         overrides["rules"] = tuple(overrides["rules"])
-    return RealRunConfig(**{k: v for k, v in overrides.items() if v not in (None, "")})
+    cleaned = {
+        k: v
+        for k, v in overrides.items()
+        if v is not None and (v != "" or k in _EMPTY_STRING_MEANINGFUL)
+    }
+    return RealRunConfig(**cleaned)
 
 
 class _TruthLabelJudge(JudgeModel):
@@ -177,20 +218,34 @@ def _dummy_committee(n_judges: int) -> list[JudgeModel]:
 
 
 class _CachedJudge:
-    """Adapter wrapper adding the verdict cache to any committee member."""
+    """Adapter wrapper adding the verdict cache to any committee member.
 
-    def __init__(self, judge: Any, cache: VerdictCache, backbone: str, judge_id: int):
+    ``context`` is the measurement fingerprint this judge's verdicts are cached under
+    (prompt version, isolation, resolved model, embedding model, prompt-length guard). A
+    cached row whose fingerprint differs is a miss, so changing any of those forces a fresh
+    judge call instead of silently replaying a measurement taken under other conditions.
+    """
+
+    def __init__(
+        self,
+        judge: Any,
+        cache: VerdictCache,
+        backbone: str,
+        judge_id: int,
+        context: Mapping[str, Any] | None = None,
+    ):
         self.judge = judge
         self.cache = cache
         self.backbone = backbone
         self.judge_id = judge_id
+        self.context = dict(context or {})
 
     def verdict(self, payload: Payload, rng: np.random.Generator) -> Verdict:
-        cached = self.cache.lookup(payload.payload_id, self.judge_id, self.backbone)
+        cached = self.cache.lookup(payload.payload_id, self.judge_id, self.backbone, self.context)
         if cached is not None:
             return cached
         verdict = self.judge.judge(payload, self.judge_id, rng)
-        self.cache.store(verdict, payload.payload_id, self.backbone)
+        self.cache.store(verdict, payload.payload_id, self.backbone, self.context)
         return verdict
 
 
@@ -200,18 +255,56 @@ def honest_committee(
     return [member.verdict(payload, rng) for member in members]
 
 
+def _effective_cache_dir(cfg: RealRunConfig) -> Path:
+    """Cache directory for this run.
+
+    A ``dummy`` run reads the ground-truth label instead of a model, so its verdicts are
+    plumbing artefacts. They are written to a sibling ``*_dummy`` directory to keep them out of
+    the cache a real run will later reuse (cache keys would not collide, but a polluted cache
+    file is still misleading to inspect and to report as cost evidence).
+    """
+    base = Path(cfg.cache_dir)
+    if cfg.backend != "dummy":
+        return base
+    dummy = base.with_name(base.name + "_dummy")
+    logger.warning(
+        "backend=dummy uses ground-truth verdicts that must never be reported; caching them "
+        "in %s instead of %s.",
+        dummy,
+        base,
+    )
+    return dummy
+
+
+def _judge_cache_context(cfg: RealRunConfig, isolation: bool, judge: Any) -> dict[str, Any]:
+    """Measurement fingerprint a judge's cached verdicts are keyed by."""
+    resolved = getattr(judge, "model", None) or getattr(judge, "model_path", None) or judge.backbone
+    return {
+        "prompt_version": JUDGE_PROMPT_VERSION,
+        "isolation": bool(isolation),
+        "backend": cfg.backend,
+        "model": str(resolved),
+        "embedding_model": cfg.embedding_model,
+        "max_prompt_chars": int(cfg.max_prompt_chars),
+    }
+
+
 def _build_committee(
     cfg: RealRunConfig,
     cache_dir: Path,
     isolation: bool,
     cache_name: str | None = None,
     ledgers: dict[str, UsageLedger] | None = None,
+    truncation: TruncationCounter | None = None,
 ) -> list[_CachedJudge]:
     """Build a cached honest committee for the given isolation setting.
 
     Every real judge in the build shares one :class:`UsageLedger` recording cost/latency per
     LLM call (RQ5). If ``ledgers`` is given, the ledger is registered under ``"iso"`` /
     ``"noiso"`` so the runner can write the per-backbone cost CSV.
+
+    The cache file is tagged by the isolation setting when ``cache_name`` is not given, so the
+    isolation-on and isolation-off builds (RQ2) can never read each other's verdicts.
     """
     raw: list[Any]
     if cfg.backend == "dummy":
@@ -227,6 +320,9 @@ def _build_committee(
             isolation=isolation,
             models=cfg.models,
             endpoints=cfg.endpoints,
+            max_prompt_chars=cfg.max_prompt_chars,
+            api_key_env=cfg.api_key_env or None,
+            truncation=truncation,
         )
     ledger = UsageLedger()
     for judge in raw:
@@ -239,8 +335,21 @@ def _build_committee(
         tag = "iso" if isolation else "noiso"
         cache_name = f"{cfg.benchmark}_{tag}_honest.jsonl"
     cache = VerdictCache(cache_dir / cache_name)
-    raw_seq: Sequence[Any] = raw
-    return [_CachedJudge(j, cache, j.backbone, k) for k, j in enumerate(raw_seq)]
+    members: list[_CachedJudge] = []
+    for k, raw_judge in enumerate(raw):
+        # ``raw`` mixes JudgeModel (dummy) and LLMJudgeAdapter (real); treat it as Any so the
+        # shared ``backbone`` attribute is not type-narrowed against the abstract base.
+        member: Any = raw_judge
+        members.append(
+            _CachedJudge(
+                member,
+                cache,
+                member.backbone,
+                k,
+                context=_judge_cache_context(cfg, isolation, member),
+            )
+        )
+    return members
 
 
 # ---------------------------------------------------------------------------- one seed pass
@@ -254,25 +363,42 @@ def _run_seed(
     attack: Attack | None,
     f_values: Sequence[int],
 ) -> dict:
-    """Run the f-sweep once; returns per-(f, method) rows and per-payload outcome arrays."""
+    """Run the f-sweep once; returns per-(f, method) rows and per-payload outcome arrays.
+
+    Besides the headline metrics each row carries ``attack_effect``: the fraction of payloads
+    whose *decision* the attack actually changed relative to the untampered honest committee.
+    A defence comparison is only informative when that number is above zero — an attack that
+    never moves a decision leaves every method looking identical, which is easy to misread as
+    "all defences are equally robust". The reference pass uses its own generator so the
+    reported random stream is unchanged by the diagnostic.
+    """
     rng = np.random.default_rng(seed)
     rows: list[dict[str, Any]] = []
     outcomes: dict[int, dict[str, dict[str, list[float]]]] = {
         int(f): {name: {"asr": [], "correct": []} for name in pipelines} for f in f_values
     }
+    reference: dict[str, list[int]] = {name: [] for name in pipelines}
+    for p in eval_payloads:
+        honest_ref = list(honest_by_payload[p.payload_id])
+        ref_rng = np.random.default_rng(seed + 999_983)
+        for name, pipe in pipelines.items():
+            reference[name].append(int(pipe.decide(honest_ref, p, ref_rng).decision))
 
     for f in f_values:
         per_method: dict[str, dict[str, Any]] = {}
         outlier_f: dict[str, list[float]] = {name: [] for name in pipelines}
         byz_f: dict[str, list[int]] = {name: [] for name in pipelines}
-        for p in eval_payloads:
+        for idx, p in enumerate(eval_payloads):
             honest = list(honest_by_payload[p.payload_id])
             tampered = attack.apply(honest, p, f, rng) if attack is not None else honest
             for name, pipe in pipelines.items():
                 res = pipe.decide(tampered, p, rng)
-                per_method.setdefault(name, {"results": [], "labels": []})
+                per_method.setdefault(name, {"results": [], "labels": [], "attack_effect": []})
                 per_method[name]["results"].append(res)
                 per_method[name]["labels"].append(int(p.true_label))
+                per_method[name]["attack_effect"].append(
+                    1.0 if int(res.decision) != reference[name][idx] else 0.0
+                )
                 decision = int(res.decision)
                 correct = 1.0 if decision == int(p.true_label) else 0.0
                 outcomes[int(f)][name]["correct"].append(correct)
@@ -286,11 +412,13 @@ def _run_seed(
         for name in pipelines:
             res_list = per_method[name]["results"]
             lab_list = per_method[name]["labels"]
+            effect = per_method[name]["attack_effect"]
             metrics = {
                 "asr_uc": asr_under_compromise(res_list, lab_list),
                 "orr": over_refusal_rate(res_list, lab_list),
                 "defense_success_rate": defense_success_rate(res_list, lab_list),
                 "threshold": thresholds.get(name, cfg.threshold),
+                "attack_effect": float(np.mean(effect)) if effect else nan,
             }
             if byz_f[name] and any(byz_f[name]) and not all(byz_f[name]):
                 det = malicious_verdict_detection(np.asarray(outlier_f[name]), np.asarray(byz_f[name]))
@@ -304,6 +432,7 @@ def _run_seed(
                     "asr_uc": metrics["asr_uc"],
                     "orr": metrics["orr"],
                     "defense_success_rate": metrics["defense_success_rate"],
+                    "attack_effect": metrics["attack_effect"],
                     "threshold": metrics["threshold"],
                     "detection_auroc": metrics.get("detection_auroc"),
                     "detection_f1": metrics.get("detection_f1"),
@@ -324,7 +453,14 @@ def _summary_rows(seed_rows: Sequence[dict], f_values: Sequence[int]) -> list[di
     rows: list[dict[str, Any]] = []
     for (f, method), items in sorted(by_key.items()):
         row: dict[str, Any] = {"f": f, "method": method, "n_seeds": len(items)}
-        for key in ("asr_uc", "orr", "defense_success_rate", "detection_auroc", "detection_f1"):
+        for key in (
+            "asr_uc",
+            "orr",
+            "defense_success_rate",
+            "attack_effect",
+            "detection_auroc",
+            "detection_f1",
+        ):
             clean = [
                 float(v)
                 for v in (it.get(key) for it in items)
@@ -430,19 +566,22 @@ def _epsilon_rows(
     eval_payloads: Sequence[Payload],
     members_deploy: Sequence[_CachedJudge],
     rng: np.random.Generator,
+    cache_dir: Path,
     ledgers: dict[str, UsageLedger] | None = None,
+    truncation: TruncationCounter | None = None,
 ) -> list[dict]:
     """Estimate Def 1 epsilon: judge verdict flip rate under an injected payload.
 
     Schema (uniform for CSV): isolation, level, epsilon_decision, score_shift, n_pairs.
     """
-    cache_dir = Path(cfg.cache_dir)
     rows: list[dict[str, Any]] = []
     for iso in (True, False):
         if iso == cfg.isolation:
             clean_members = list(members_deploy)
         else:
-            clean_members = _build_committee(cfg, cache_dir, iso, ledgers=ledgers)
+            clean_members = _build_committee(
+                cfg, cache_dir, iso, ledgers=ledgers, truncation=truncation
+            )
         tag = "iso" if iso else "noiso"
         inj_cache = VerdictCache(cache_dir / f"{cfg.benchmark}_{tag}_injected.jsonl")
         inj_members = [
@@ -488,6 +627,154 @@ def _flatten(nested: Sequence[Sequence[Verdict]]) -> list[Verdict]:
 
 def _finite(v: float) -> bool:
     return bool(np.isfinite(v))
+
+
+# ------------------------------------------------------------------- provenance / preflight
+def _dataset_fingerprint(path: Path, payloads: Sequence[Payload]) -> dict[str, Any]:
+    """Identify the exact benchmark file a run consumed (auditable data provenance).
+
+    Records the SHA-256 of the CSV actually read, how many rows were used after ``data.limit``,
+    and the label split, so a table cell can be traced back to bytes on disk.
+    """
+    digest = hashlib.sha256()
+    if path.exists():
+        with path.open("rb") as fh:
+            for chunk in iter(lambda: fh.read(1 << 20), b""):
+                digest.update(chunk)
+        sha = digest.hexdigest()
+    else:
+        sha = ""
+    n_block = sum(1 for p in payloads if int(p.true_label) == Decision.BLOCK)
+    return {
+        "path": str(path),
+        "sha256": sha,
+        "split": path.stem,
+        "n_used": len(payloads),
+        "n_must_block": n_block,
+        "n_benign": len(payloads) - n_block,
+    }
+
+
+def _config_snapshot(
+    cfg: RealRunConfig,
+    *,
+    benchmark_dir: str,
+    n_payloads: int,
+    n_eval: int,
+    f_values: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    """Full config snapshot for the provenance file.
+
+    Everything that can move the numbers belongs here: without the effective ``attack_kwargs``,
+    the calibration settings and the prompt-length guard, a provenance record cannot reproduce
+    the run it describes. Credential *names* are excluded on purpose — the provenance file must
+    never contain anything secret-adjacent (see ``tests/test_reproducibility.py``).
+    """
+    snapshot: dict[str, Any] = {
+        "n_judges": cfg.n_judges,
+        "rules": list(cfg.rules),
+        "attack": cfg.attack,
+        "attack_kwargs": dict(cfg.attack_kwargs),
+        "f": cfg.f,
+        "threshold": cfg.threshold,
+        "escalate_band": cfg.escalate_band,
+        "calibrate": cfg.calibrate,
+        "target_orr": cfg.target_orr,
+        "calibration_min_samples": cfg.calibration_min_samples,
+        "calibration_on_insufficient": cfg.calibration_on_insufficient,
+        "seed": cfg.seed,
+        "n_seeds": cfg.n_seeds,
+        "benchmark": cfg.benchmark,
+        "benchmark_dir": benchmark_dir,
+        "split": cfg.split,
+        "limit": cfg.limit,
+        "n_payloads": n_payloads,
+        "n_eval": n_eval,
+        "backend": cfg.backend,
+        "backbones": list(cfg.backbones),
+        "model": cfg.model,
+        "models": cfg.models,
+        "endpoints": cfg.endpoints,
+        "embedding_model": cfg.embedding_model,
+        "isolation": cfg.isolation,
+        "max_prompt_chars": cfg.max_prompt_chars,
+        "cache_dir": str(_effective_cache_dir(cfg)),
+        "measure_theory": cfg.measure_theory,
+        "measure_epsilon": cfg.measure_epsilon,
+    }
+    if f_values is not None:
+        snapshot["f_values"] = [int(f) for f in f_values]
+    return snapshot
+
+
+def _warn_if_attack_is_inert(cfg: RealRunConfig, sweep_rows: Sequence[dict]) -> None:
+    """Warn when the configured attack never changes a decision (D: uninformative Table 5).
+
+    A collusion attack whose coordinated shift is small relative to the honest verdict spread
+    leaves every aggregate on the same side of the threshold. All methods then score identically
+    and the comparison says nothing about robustness — which is easy to mistake for "all
+    defences are equally robust".
+    """
+    if cfg.attack == "none":
+        return
+    effects = [
+        float(row["attack_effect"])
+        for row in sweep_rows
+        if int(row["f"]) >= 1
+        and str(row["method"]).startswith("aegis")
+        and isinstance(row.get("attack_effect"), (int, float))
+        and np.isfinite(float(row["attack_effect"]))
+    ]
+    if not effects:
+        return
+    if max(effects) == 0.0:
+        logger.warning(
+            "Attack %r changed no decision at f >= 1 for any Aegis rule (attack_effect = 0): "
+            "every method will look identical, so this run cannot separate defences. Check "
+            "experiment.attack_kwargs (e.g. collusion radius/budget) against the observed honest "
+            "verdict spread before reporting a comparison table.",
+            cfg.attack,
+        )
+    else:
+        logger.info(
+            "Attack %r decision-flip rate (max over f >= 1, Aegis rules): %.4f.",
+            cfg.attack,
+            max(effects),
+        )
+
+
+def _warn_seed_scope(cfg: RealRunConfig) -> None:
+    """Make the meaning of ``n_seeds`` explicit (it does not resample the judges)."""
+    if cfg.n_seeds > 1:
+        logger.warning(
+            "n_seeds=%d repeats the attack/aggregation draw only: honest verdicts are cached "
+            "and reused across seeds, so the reported std measures attack randomness, not judge "
+            "stochasticity (real judges decode greedily at temperature 0).",
+            cfg.n_seeds,
+        )
+
+
+def _warn_if_output_dir_has_other_benchmark(out_dir: Path, benchmark: str) -> None:
+    """Warn before silently overwriting another benchmark's result files in the same directory."""
+    prov_path = out_dir / "real_evaluation_provenance.json"
+    if not prov_path.exists():
+        return
+    try:
+        import json
+
+        previous = json.loads(prov_path.read_text(encoding="utf-8"))
+        previous_benchmark = (previous.get("config") or {}).get("benchmark")
+    except Exception:  # pragma: no cover - unreadable/foreign provenance file
+        return
+    if previous_benchmark and previous_benchmark != benchmark:
+        logger.warning(
+            "%s already holds results for benchmark %r; this run (%r) will overwrite them. "
+            "Use a per-benchmark output directory (e.g. AEGIS_OUT=outputs/real_%s).",
+            out_dir,
+            previous_benchmark,
+            benchmark,
+            benchmark,
+        )
 
 
 # -------------------------------------------------------------------- cost / latency (RQ5)
@@ -634,9 +921,10 @@ def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
     """
     rng = np.random.default_rng(cfg.seed)
     out_dir = ensure_dir(Path(output_dir))
-    cache_dir = Path(cfg.cache_dir)
+    cache_dir = _effective_cache_dir(cfg)
 
     benchmark_dir = resolve_benchmark_dir(cfg.benchmark)
+    bench_path = Path(cfg.data_root) / benchmark_dir / f"{cfg.split}.csv"
     adapter = CsvBenchmarkAdapter(root=Path(cfg.data_root) / benchmark_dir, split=cfg.split)
     payloads = list(adapter.iter_payloads())
     if cfg.limit and cfg.limit > 0:
@@ -644,14 +932,16 @@ def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
     if not payloads:
         raise ValueError(f"Benchmark {cfg.benchmark!r} yielded no payloads at {cfg.data_root}.")
     logger.info("Ablation: %d payload(s) from %s (%s).", len(payloads), benchmark_dir, cfg.benchmark)
+    _warn_seed_scope(cfg)
 
+    truncation = TruncationCounter()
     ledgers: dict[str, UsageLedger] = {}
     members = _build_committee(
         cfg,
         cache_dir,
         cfg.isolation,
-        cache_name=f"{cfg.benchmark}_honest.jsonl",
         ledgers=ledgers,
+        truncation=truncation,
     )
     attack_cls = ATTACKS[cfg.attack]
     attack_kwargs = dict(cfg.attack_kwargs)
@@ -693,7 +983,9 @@ def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
 
     # --- payload isolation on/off -> Def 1 epsilon (replays the injected payload) ---
     if cfg.measure_epsilon and eval_payloads:
-        eps = _epsilon_rows(cfg, eval_payloads, members, rng, ledgers=ledgers)
+        eps = _epsilon_rows(
+            cfg, eval_payloads, members, rng, cache_dir, ledgers=ledgers, truncation=truncation
+        )
         for iso in (True, False):
             row = next(
                 (r for r in eps if r["isolation"] == iso and r["level"] == "overall"), None
@@ -739,20 +1031,13 @@ def run_real_ablation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
         run_id="real_ablation",
         stage="ablation",
         seed=cfg.seed,
-        config={
-            "n_judges": cfg.n_judges,
-            "benchmark": cfg.benchmark,
-            "benchmark_dir": benchmark_dir,
-            "n_payloads": len(payloads),
-            "backend": cfg.backend,
-            "backbones": list(cfg.backbones),
-            "model": cfg.model,
-            "models": cfg.models,
-            "endpoints": cfg.endpoints,
-            "embedding_model": cfg.embedding_model,
-            "isolation": cfg.isolation,
-            "threshold": cfg.threshold,
-            "measure_epsilon": cfg.measure_epsilon,
+        config=_config_snapshot(
+            cfg, benchmark_dir=benchmark_dir, n_payloads=len(payloads), n_eval=len(eval_payloads)
+        ),
+        extra={
+            "dataset": _dataset_fingerprint(bench_path, payloads),
+            "truncations": truncation.to_dict(),
+            "seed_scope": "attack_and_aggregation_only; honest verdicts are cached",
         },
         data_source="real",
         note=(
@@ -777,9 +1062,10 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
     rng = np.random.default_rng(cfg.seed)
     out_dir = Path(output_dir)
     ensure_dir(out_dir)
-    cache_dir = Path(cfg.cache_dir)
+    cache_dir = _effective_cache_dir(cfg)
 
     benchmark_dir = resolve_benchmark_dir(cfg.benchmark)
+    bench_path = Path(cfg.data_root) / benchmark_dir / f"{cfg.split}.csv"
     adapter = CsvBenchmarkAdapter(root=Path(cfg.data_root) / benchmark_dir, split=cfg.split)
     payloads = list(adapter.iter_payloads())
     if cfg.limit and cfg.limit > 0:
@@ -787,10 +1073,13 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
     if not payloads:
         raise ValueError(f"Benchmark {cfg.benchmark!r} yielded no payloads at {cfg.data_root}.")
     logger.info("Loaded %d payload(s) from %s (%s).", len(payloads), benchmark_dir, cfg.benchmark)
+    _warn_if_output_dir_has_other_benchmark(out_dir, cfg.benchmark)
+    _warn_seed_scope(cfg)
 
+    truncation = TruncationCounter()
     ledgers: dict[str, UsageLedger] = {}
     members = _build_committee(
-        cfg, cache_dir, cfg.isolation, cache_name=f"{cfg.benchmark}_honest.jsonl", ledgers=ledgers
+        cfg, cache_dir, cfg.isolation, ledgers=ledgers, truncation=truncation
     )
     pipelines = build_pipelines(
         TrialConfig(
@@ -809,6 +1098,8 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
     if cfg.attack == "collusion" and "radius" not in attack_kwargs:
         attack_kwargs["radius"] = 0.1
     attack = attack_cls(**attack_kwargs) if attack_cls is not None else None
+    # The effective kwargs (defaults filled in) are what the provenance must record.
+    effective_attack_kwargs = dict(attack_kwargs)
 
     # ---- honest committee verdicts (cached); optional threshold calibration ----
     n_cal = max(1, len(payloads) // 4) if cfg.calibrate else 0
@@ -827,17 +1118,31 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
                 cal_method_scores[name].append(res.aggregate_score)
                 cal_method_labels[name].append(p.true_label)
 
+    cal_label_counts = {
+        "n_benign": sum(1 for y in cal_method_labels.get("single_model", []) if int(y) == 0),
+        "n_must_block": sum(1 for y in cal_method_labels.get("single_model", []) if int(y) == 1),
+    }
     thresholds: dict[str, float] = {}
     if n_cal:
         for name, scores in cal_method_scores.items():
             if not scores:
                 continue
-            cal = calibrate_threshold(
-                np.asarray(scores),
-                np.asarray(cal_method_labels[name]),
-                objective="target_orr",
-                target=cfg.target_orr,
-            )
+            try:
+                cal = calibrate_threshold(
+                    np.asarray(scores),
+                    np.asarray(cal_method_labels[name]),
+                    objective="target_orr",
+                    target=cfg.target_orr,
+                    min_samples=cfg.calibration_min_samples,
+                    on_insufficient=cfg.calibration_on_insufficient,
+                )
+            except ValueError as exc:
+                raise ValueError(
+                    f"Threshold calibration failed for method {name!r} on benchmark "
+                    f"{cfg.benchmark!r}: calibration slice = first {n_cal} of {len(payloads)} "
+                    f"payload(s), {cal_label_counts['n_benign']} benign / "
+                    f"{cal_label_counts['n_must_block']} must-block. {exc}"
+                ) from exc
             thresholds[name] = cal.threshold
             _set_pipeline_threshold(pipelines[name], cal.threshold)
 
@@ -854,6 +1159,7 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
     ]
     sweep_rows = seed_outputs[0]["rows"]
     summary_rows = _summary_rows(seed_outputs, f_values)
+    _warn_if_attack_is_inert(cfg, sweep_rows)
 
     base = "autodefense" if "autodefense" in pipelines else "single_model"
     significance_rows = _significance_rows(
@@ -866,7 +1172,9 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
 
     epsilon_rows: list[dict] = []
     if cfg.measure_epsilon and eval_payloads:
-        epsilon_rows = _epsilon_rows(cfg, eval_payloads, members, rng, ledgers=ledgers)
+        epsilon_rows = _epsilon_rows(
+            cfg, eval_payloads, members, rng, cache_dir, ledgers=ledgers, truncation=truncation
+        )
 
     # ---- cost / latency (RQ5) ----
     cost_summary = _cost_summary_rows(cfg, ledgers, len(eval_payloads))
@@ -885,27 +1193,36 @@ def run_real_evaluation(cfg: RealRunConfig, output_dir: str | Path) -> dict:
         run_id="real_evaluation",
         stage="evaluate",
         seed=cfg.seed,
-        config={
-            "n_judges": cfg.n_judges,
-            "rules": list(cfg.rules),
-            "attack": cfg.attack,
-            "f": cfg.f,
-            "benchmark": cfg.benchmark,
-            "benchmark_dir": benchmark_dir,
-            "split": cfg.split,
-            "n_payloads": len(payloads),
-            "n_eval": len(eval_payloads),
-            "n_seeds": len(seeds),
-            "backend": cfg.backend,
-            "backbones": list(cfg.backbones),
-            "model": cfg.model,
-            "models": cfg.models,
-            "endpoints": cfg.endpoints,
-            "embedding_model": cfg.embedding_model,
-            "isolation": cfg.isolation,
-            "measure_theory": cfg.measure_theory,
-            "measure_epsilon": cfg.measure_epsilon,
-            "f_values": [int(f) for f in f_values],
+        config=_config_snapshot(
+            cfg,
+            benchmark_dir=benchmark_dir,
+            n_payloads=len(payloads),
+            n_eval=len(eval_payloads),
+            f_values=f_values,
+        ),
+        extra={
+            "dataset": _dataset_fingerprint(bench_path, payloads),
+            "truncations": truncation.to_dict(),
+            "cache": {
+                "dir": str(cache_dir),
+                "n_cached_verdicts": len(members[0].cache) if members else 0,
+                "n_stale_lookups": sum(getattr(m.cache, "n_stale", 0) for m in members),
+                "context": _judge_cache_context(cfg, cfg.isolation, members[0].judge) if members else {},
+            },
+            "effective_attack_kwargs": effective_attack_kwargs,
+            "calibration": {
+                "enabled": bool(n_cal),
+                "n_calibration": n_cal,
+                "n_benign": cal_label_counts["n_benign"],
+                "n_must_block": cal_label_counts["n_must_block"],
+                "thresholds": {k: float(v) for k, v in thresholds.items()},
+            },
+            "seed_scope": "attack_and_aggregation_only; honest verdicts are cached",
+            "truncation_policy": (
+                f"middle elision at max_prompt_chars={cfg.max_prompt_chars}"
+                if cfg.max_prompt_chars
+                else "disabled (payloads sent unchanged)"
+            ),
         },
         data_source="real",
         note=(

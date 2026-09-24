@@ -24,10 +24,11 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass, field
 from math import nan
 from pathlib import Path
 from time import perf_counter
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -36,6 +37,15 @@ from aegis_agency.data.schemas import Payload, Verdict
 from aegis_agency.utils.logging import get_logger
 
 logger = get_logger(__name__)
+
+#: Version of the judge prompt template. BUMP THIS whenever :class:`JudgePromptBuilder` changes
+#: its wording or channel layout. Cached verdicts record the version they were produced under
+#: (:class:`VerdictCache`), so a prompt change invalidates the cache instead of silently reusing
+#: measurements taken under a different prompt.
+JUDGE_PROMPT_VERSION = "judge-prompt-v1"
+
+#: Marker inserted where a payload was shortened to fit the served context window.
+TRUNCATION_MARKER = "\n[... {n} characters elided to fit the judge context window ...]\n"
 
 
 class VerdictParseError(RuntimeError):
@@ -142,6 +152,56 @@ def _coerce_score(value: Any) -> float | None:
     return None
 
 
+def truncate_payload(content: str, max_chars: int) -> tuple[str, int]:
+    """Middle-truncate ``content`` so the judge prompt fits the served context window.
+
+    Returns ``(content, elided_chars)`` where ``elided_chars == 0`` means unchanged.
+    ``max_chars <= 0`` disables truncation (the default: never silently alter the payload).
+
+    The head and the tail are kept because benchmark payloads usually carry the operative
+    instruction at one end, and the elided middle is replaced by an explicit marker so an
+    auditor reading the rendered prompt can see the payload was shortened. Truncation is a
+    *measurement condition*: it is logged, counted, and recorded in the run provenance.
+    """
+    if max_chars <= 0 or len(content) <= max_chars:
+        return content, 0
+    if max_chars < 64:
+        raise ValueError(f"max_chars must be 0 (disabled) or >= 64; got {max_chars}.")
+    marker_len = len(TRUNCATION_MARKER.format(n=len(content)))
+    keep = max(2, max_chars - marker_len)
+    head = keep // 2 + keep % 2
+    tail = keep // 2
+    elided = len(content) - keep
+    shortened = content[:head] + TRUNCATION_MARKER.format(n=elided) + (content[len(content) - tail :] if tail else "")
+    return shortened, elided
+
+
+@dataclass
+class TruncationCounter:
+    """Counts payloads shortened to fit the judge context window (RQ-visible measurement note)."""
+
+    events: int = 0
+    elided_chars: int = 0
+    payload_ids: set[str] = field(default_factory=set)
+
+    def record(self, payload_id: str, elided: int) -> None:
+        self.events += 1
+        self.elided_chars += int(elided)
+        self.payload_ids.add(str(payload_id))
+
+    @property
+    def n_payloads(self) -> int:
+        """Number of distinct payloads that were truncated at least once."""
+        return len(self.payload_ids)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "events": int(self.events),
+            "n_payloads": int(self.n_payloads),
+            "elided_chars": int(self.elided_chars),
+        }
+
+
 class JudgePromptBuilder:
     """Builds the isolated judge prompt: operator task + payload in the data channel.
 
@@ -168,14 +228,29 @@ class JudgePromptBuilder:
         "===== END CANDIDATE OUTPUT ====="
     )
 
-    def __init__(self, isolation: bool = True):
+    def __init__(self, isolation: bool = True, max_prompt_chars: int = 0):
         self.isolation = isolation
+        self.max_prompt_chars = int(max_prompt_chars)
+        if self.max_prompt_chars and self.max_prompt_chars < 64:
+            raise ValueError(f"max_prompt_chars must be 0 or >= 64; got {self.max_prompt_chars}.")
 
-    def build(self, payload: Payload, judge_id: int) -> str:
+    def content_for(self, payload: Payload) -> tuple[str, int]:
+        """Return ``(content, elided_chars)`` after applying the context-window guard."""
+        return truncate_payload(payload.content, self.max_prompt_chars)
+
+    def build(
+        self,
+        payload: Payload,
+        judge_id: int,
+        truncation: TruncationCounter | None = None,
+    ) -> str:
+        content, elided = self.content_for(payload)
+        if elided and truncation is not None:
+            truncation.record(payload.payload_id, elided)
         task = self._INSTRUCTION.format(judge_id=judge_id)
         if not self.isolation:
-            return f"{task}\n\nCandidate output:\n{payload.content}\n\nRespond with the JSON."
-        return f"{task}\n\n{self._DATA_CHANNEL.format(content=payload.content)}"
+            return f"{task}\n\nCandidate output:\n{content}\n\nRespond with the JSON."
+        return f"{task}\n\n{self._DATA_CHANNEL.format(content=content)}"
 
 
 class EmbeddingExtractor:
@@ -204,11 +279,27 @@ class EmbeddingExtractor:
         logger.info("EmbeddingExtractor ready on %s (dim=%d).", self.model_name, self.dim)
 
     def embed(self, rationale: str) -> np.ndarray:
-        if not self.model_name or not rationale.strip():
+        """Embed a rationale into ``R^m``; a missing rationale becomes a zero vector of ``m``.
+
+        An empty rationale (a short answer, a refusal mapped to BLOCK, or a JSON verdict that
+        omitted the field) must still produce a vector of the *same* dimension as the judge's
+        other verdicts: the aggregation stage stacks verdict vectors into one matrix and
+        rejects a committee whose rows have mixed dimensions. Returning ``zeros(0)`` here would
+        make a single terse judge response abort the whole run.
+        """
+        if not self.model_name:
             return np.zeros(0)
         self._ensure()
+        if not rationale.strip():
+            return np.zeros(self.dim)
         vec = np.asarray(self._model.encode([rationale], normalize_embeddings=True)[0], dtype=float)
         return vec
+
+    @property
+    def expected_dim(self) -> int:
+        """Dimension ``m`` of the verdict embedding produced by this extractor (0 if disabled)."""
+        self._ensure()
+        return self.dim
 
 
 class UsageLedger:
@@ -283,14 +374,32 @@ class UsageLedger:
 
 
 class VerdictCache:
-    """JSONL cache of honest committee verdicts keyed by (payload_id, judge_id, backbone)."""
+    """JSONL cache of honest committee verdicts keyed by (payload_id, judge_id, backbone).
 
-    def __init__(self, path: str | Path):
+    Each record is stamped with the *measurement context* it was produced under (isolation
+    setting, judge-prompt version, resolved backbone model, embedding model and prompt-length
+    guard). A lookup whose context differs from the run being executed is a **miss**: the
+    prompt, the weights, or the verdict dimension changed, so the stored row is not the same
+    measurement. Without this, toggling ``judges.isolation`` for the RQ2 ablation would replay
+    isolation-on verdicts as if they had been produced with isolation off.
+
+    Records written by an older layout (no ``context`` key) are also treated as stale, so the
+    worst case of a schema change is extra judge calls, never a silently wrong result.
+    """
+
+    def __init__(self, path: str | Path, context: Mapping[str, Any] | None = None):
         self.path = Path(path)
+        self.context = dict(context or {})
         self._records: dict[tuple[str, int, str], dict[str, Any]] = {}
+        self.n_stale: int = 0
         if self.path.exists():
             self._load()
-        logger.info("VerdictCache %s: %d cached verdict(s).", self.path, len(self._records))
+        logger.info(
+            "VerdictCache %s: %d cached verdict(s)%s.",
+            self.path,
+            len(self._records),
+            f", context={self.context}" if self.context else "",
+        )
 
     @staticmethod
     def _key(payload_id: str, judge_id: int, backbone: str) -> tuple[str, int, str]:
@@ -306,9 +415,25 @@ class VerdictCache:
                 key = self._key(rec["payload_id"], rec["judge_id"], rec["backbone"])
                 self._records[key] = rec
 
-    def lookup(self, payload_id: str, judge_id: int, backbone: str) -> Verdict | None:
+    @staticmethod
+    def _context_matches(stored: Any, expected: Mapping[str, Any]) -> bool:
+        if not isinstance(stored, dict):
+            return False
+        return all(stored.get(k) == v for k, v in expected.items())
+
+    def lookup(
+        self,
+        payload_id: str,
+        judge_id: int,
+        backbone: str,
+        context: Mapping[str, Any] | None = None,
+    ) -> Verdict | None:
         rec = self._records.get(self._key(payload_id, judge_id, backbone))
         if rec is None:
+            return None
+        expected = dict(context) if context else self.context
+        if expected and not self._context_matches(rec.get("context"), expected):
+            self.n_stale += 1
             return None
         return Verdict(
             decision=int(rec["decision"]),
@@ -318,7 +443,14 @@ class VerdictCache:
             is_byzantine=bool(rec.get("is_byzantine", False)),
         )
 
-    def store(self, verdict: Verdict, payload_id: str, backbone: str) -> None:
+    def store(
+        self,
+        verdict: Verdict,
+        payload_id: str,
+        backbone: str,
+        context: Mapping[str, Any] | None = None,
+    ) -> None:
+        expected = dict(context) if context else dict(self.context)
         rec = {
             "payload_id": payload_id,
             "judge_id": int(verdict.judge_id),
@@ -326,13 +458,15 @@ class VerdictCache:
             "decision": int(verdict.decision),
             "score": float(verdict.score),
             "embedding": verdict.embedding.tolist(),
+            "embedding_dim": int(verdict.embedding.size),
             "is_byzantine": bool(verdict.is_byzantine),
+            "context": expected,
         }
         key = self._key(payload_id, verdict.judge_id, backbone)
         self._records[key] = rec
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(rec, sort_keys=True) + "\n")
+            fh.write(json.dumps(rec, sort_keys=True, default=str) + "\n")
 
     def __len__(self) -> int:
         return len(self._records)
@@ -352,6 +486,7 @@ class OpenAICompatJudge(LLMJudgeAdapter):
         temperature: float = 0.0,
         max_tokens: int = 512,
         timeout: float = 120.0,
+        max_prompt_chars: int = 0,
         prompt_builder: JudgePromptBuilder | None = None,
     ):
         super().__init__(backbone=backbone, endpoint_or_path=endpoint, isolation=isolation)
@@ -361,7 +496,9 @@ class OpenAICompatJudge(LLMJudgeAdapter):
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.embedder = EmbeddingExtractor(embedding_model)
-        self.prompt_builder = prompt_builder or JudgePromptBuilder(isolation=isolation)
+        self.prompt_builder = prompt_builder or JudgePromptBuilder(
+            isolation=isolation, max_prompt_chars=max_prompt_chars
+        )
         self._client: Any = None
 
     # ---------------------------------------------------------------------------- client setup
@@ -393,7 +530,7 @@ class OpenAICompatJudge(LLMJudgeAdapter):
         return self._client
 
     def judge(self, payload: Payload, judge_id: int, rng: np.random.Generator) -> Verdict:
-        prompt = self.prompt_builder.build(payload, judge_id)
+        prompt = self.prompt_builder.build(payload, judge_id, truncation=self._truncation)
         client = self._ensure_client()
         t0 = perf_counter()
         try:
@@ -406,7 +543,13 @@ class OpenAICompatJudge(LLMJudgeAdapter):
             text = resp.choices[0].message.content or ""
             elapsed = perf_counter() - t0
         except Exception as exc:  # pragma: no cover - network path
-            raise RuntimeError(f"OpenAI-compatible endpoint call failed: {exc}") from exc
+            raise RuntimeError(
+                f"OpenAI-compatible endpoint call failed for payload "
+                f"{payload.payload_id!r} ({len(payload.content)} chars, model={self.model!r}): "
+                f"{exc}. If this is a context-length error, set judges.max_prompt_chars "
+                f"(e.g. 16000) or raise VLLM_MAX_LEN so long payloads are handled "
+                f"deterministically instead of aborting the run."
+            ) from exc
         usage = getattr(resp, "usage", None)
         self._record_cost(
             payload.payload_id,
@@ -431,6 +574,7 @@ class AnthropicJudge(LLMJudgeAdapter):
         temperature: float = 0.0,
         max_tokens: int = 512,
         timeout: float = 120.0,
+        max_prompt_chars: int = 0,
         prompt_builder: JudgePromptBuilder | None = None,
     ):
         super().__init__(backbone=backbone, endpoint_or_path=model, isolation=isolation)
@@ -440,7 +584,9 @@ class AnthropicJudge(LLMJudgeAdapter):
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.embedder = EmbeddingExtractor(embedding_model)
-        self.prompt_builder = prompt_builder or JudgePromptBuilder(isolation=isolation)
+        self.prompt_builder = prompt_builder or JudgePromptBuilder(
+            isolation=isolation, max_prompt_chars=max_prompt_chars
+        )
         self._client: Any = None
 
     def _ensure_client(self) -> Any:
@@ -463,7 +609,7 @@ class AnthropicJudge(LLMJudgeAdapter):
         return self._client
 
     def judge(self, payload: Payload, judge_id: int, rng: np.random.Generator) -> Verdict:
-        prompt = self.prompt_builder.build(payload, judge_id)
+        prompt = self.prompt_builder.build(payload, judge_id, truncation=self._truncation)
         client = self._ensure_client()
         t0 = perf_counter()
         try:
@@ -476,7 +622,11 @@ class AnthropicJudge(LLMJudgeAdapter):
             text = "".join(block.text for block in resp.content if block.type == "text")
             elapsed = perf_counter() - t0
         except Exception as exc:  # pragma: no cover - network path
-            raise RuntimeError(f"Anthropic API call failed: {exc}") from exc
+            raise RuntimeError(
+                f"Anthropic API call failed for payload {payload.payload_id!r} "
+                f"({len(payload.content)} chars, model={self.model!r}): {exc}. If this is a "
+                f"context-length error, set judges.max_prompt_chars (e.g. 16000)."
+            ) from exc
         usage = getattr(resp, "usage", None)
         self._record_cost(
             payload.payload_id,
@@ -499,6 +649,7 @@ class HuggingFaceJudge(LLMJudgeAdapter):
         embedding_model: str = "",
         max_new_tokens: int = 512,
         timeout: float = 180.0,
+        max_prompt_chars: int = 0,
         prompt_builder: JudgePromptBuilder | None = None,
     ):
         super().__init__(backbone=backbone, endpoint_or_path=model_path, isolation=isolation)
@@ -506,7 +657,9 @@ class HuggingFaceJudge(LLMJudgeAdapter):
         self.max_new_tokens = max_new_tokens
         self.timeout = timeout
         self.embedder = EmbeddingExtractor(embedding_model)
-        self.prompt_builder = prompt_builder or JudgePromptBuilder(isolation=isolation)
+        self.prompt_builder = prompt_builder or JudgePromptBuilder(
+            isolation=isolation, max_prompt_chars=max_prompt_chars
+        )
         self._pipe: Any = None
 
     def _ensure_pipe(self) -> Any:
@@ -529,7 +682,7 @@ class HuggingFaceJudge(LLMJudgeAdapter):
         return self._pipe
 
     def judge(self, payload: Payload, judge_id: int, rng: np.random.Generator) -> Verdict:
-        prompt = self.prompt_builder.build(payload, judge_id)
+        prompt = self.prompt_builder.build(payload, judge_id, truncation=self._truncation)
         pipe = self._ensure_pipe()
         t0 = perf_counter()
         try:
@@ -542,7 +695,11 @@ class HuggingFaceJudge(LLMJudgeAdapter):
             generated = str(output[0]["generated_text"])
             elapsed = perf_counter() - t0
         except Exception as exc:  # pragma: no cover - model path
-            raise RuntimeError(f"HuggingFace checkpoint call failed: {exc}") from exc
+            raise RuntimeError(
+                f"HuggingFace checkpoint call failed for payload {payload.payload_id!r} "
+                f"({len(payload.content)} chars, path={self.model_path!r}): {exc}. If this is a "
+                f"context-length error, set judges.max_prompt_chars (e.g. 16000)."
+            ) from exc
         # Local checkpoints report no token usage; record wall time only (0 tokens).
         self._record_cost(payload.payload_id, judge_id, elapsed, 0, 0)
         # Strip the echoed prompt before parsing the model's continuation.
@@ -561,6 +718,9 @@ def build_real_judges(
     isolation: bool = True,
     models: dict[str, str] | None = None,
     endpoints: dict[str, str] | None = None,
+    max_prompt_chars: int = 0,
+    api_key_env: str | None = None,
+    truncation: TruncationCounter | None = None,
 ) -> list[LLMJudgeAdapter]:
     """Instantiate a committee of ``n_judges`` real judges from the backbone list.
 
@@ -569,6 +729,11 @@ def build_real_judges(
     (shared) ``model`` / ``endpoint`` per backbone name, so a genuinely mixed-backbone
     committee can be declared in the config (e.g. each backbone served by its own vLLM port).
     Unlisted backbones fall back to ``model`` / ``endpoint`` unchanged.
+
+    ``max_prompt_chars`` (0 = off) shortens over-long payloads deterministically so they fit
+    the served context window; ``api_key_env`` overrides the env var each backend reads for
+    its credential (``None`` keeps the backend's own default); ``truncation`` collects how
+    many payloads were shortened so the run can record it in its provenance.
     """
     judges: list[LLMJudgeAdapter] = []
     default_endpoint = endpoint or "http://127.0.0.1:8001/v1"
@@ -588,8 +753,10 @@ def build_real_judges(
                     backbone=backbone,
                     model=model_name,
                     endpoint=endpoint_url or default_endpoint,
+                    api_key_env=api_key_env or "OPENAI_API_KEY",
                     embedding_model=embedding_model,
                     isolation=isolation,
+                    max_prompt_chars=max_prompt_chars,
                 )
             )
         elif backend == "anthropic":
@@ -597,8 +764,10 @@ def build_real_judges(
                 AnthropicJudge(
                     backbone=backbone,
                     model=model_name,
+                    api_key_env=api_key_env or "ANTHROPIC_API_KEY",
                     embedding_model=embedding_model,
                     isolation=isolation,
+                    max_prompt_chars=max_prompt_chars,
                 )
             )
         elif backend == "hf":
@@ -608,8 +777,14 @@ def build_real_judges(
                     model_path=model_name,
                     embedding_model=embedding_model,
                     isolation=isolation,
+                    max_prompt_chars=max_prompt_chars,
                 )
             )
         else:
             raise ValueError(f"Unknown judge backend: {backend!r}.")
+    if truncation is not None:
+        for judge in judges:
+            setter = getattr(judge, "set_truncation_counter", None)
+            if setter is not None:
+                setter(truncation)
     return judges
